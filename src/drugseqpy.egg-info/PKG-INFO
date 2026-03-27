@@ -1,0 +1,193 @@
+Metadata-Version: 2.4
+Name: drugseqpy
+Version: 0.1.0
+Summary: Quality control and analysis of DRUG-seq / HTTr high-throughput transcriptomics data
+Author: DRUGseqPy authors
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: anndata>=0.10
+Requires-Dist: scanpy>=1.10
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.0
+Requires-Dist: scipy>=1.12
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: seaborn>=0.13
+Requires-Dist: plotly>=5.20
+Requires-Dist: pydeseq2>=0.4
+Requires-Dist: statsmodels>=0.14
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: umap-learn>=0.5
+Requires-Dist: harmonypy>=0.0.9
+Requires-Dist: gseapy>=1.1
+Requires-Dist: lmfit>=1.3
+Requires-Dist: tqdm>=4.66
+Requires-Dist: joblib>=1.3
+Requires-Dist: requests>=2.31
+Provides-Extra: full
+Requires-Dist: inmoose>=0.2; extra == "full"
+Requires-Dist: decoupler>=1.6; extra == "full"
+Requires-Dist: chembl-webresource-client>=0.10; extra == "full"
+Requires-Dist: rdkit>=2023.9; extra == "full"
+Requires-Dist: jupyter>=1.0; extra == "full"
+Requires-Dist: ipywidgets>=8.0; extra == "full"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: pytest-cov>=4.1; extra == "dev"
+Requires-Dist: black>=24.0; extra == "dev"
+Requires-Dist: ruff>=0.3; extra == "dev"
+Requires-Dist: mypy>=1.8; extra == "dev"
+
+# DRUGseqPy
+
+Python reimplementation of the DRUGseqR package for quality control and analysis of Drug-seq / MAC-seq / HTTr high-throughput transcriptomics data. Built on [AnnData](https://anndata.readthedocs.io) and [scanpy](https://scanpy.readthedocs.io).
+
+## Overview
+
+DRUGseqPy follows scanpy conventions throughout: the central data structure is a standard `AnnData` object where **rows are samples** and **columns are genes**, wrapped in a thin `DrugSeqData` class that enforces Drug-seq metadata conventions. Every function accepts and returns plain `AnnData` objects, so the entire scanpy and scverse ecosystem is compatible out of the box.
+
+## AnnData layout
+
+| Slot | Contents |
+|---|---|
+| `adata.X` | Normalized expression (log-CPM or voom-weighted), float32 |
+| `adata.layers['counts']` | Raw integer counts — never modified |
+| `adata.obs` | Sample metadata: `plate_id`, `well_id`, `compound`, `dose`, `sample_type` |
+| `adata.var` | Gene metadata: `is_mito`, `is_ribo`, `highly_variable` |
+| `adata.uns['plate_qc']` | Per-plate Z', SSMD, DMSO CV, spatial well matrix |
+| `adata.uns['de_results']` | Dict of compound → DE DataFrame |
+| `adata.uns['gsea']` | Dict of compound → gseapy results |
+| `adata.obsm['X_pca']` | PCA embedding |
+| `adata.obsm['X_umap']` | UMAP embedding |
+| `adata.obsm['X_dmso_pca']` | DMSO-anchored perturbation embedding |
+| `adata.obs['pert_score']` | Z-scored distance from DMSO centroid |
+
+## Installation
+
+```bash
+# Core
+pip install drugseqpy
+
+# Full (includes rdkit via conda, igraph, decoupler)
+pip install "drugseqpy[full]"
+
+# Development
+pip install "drugseqpy[dev]"
+```
+
+For rdkit (cheminformatics):
+```bash
+conda install -c conda-forge rdkit
+```
+
+## Quickstart
+
+```python
+import drugseqpy as ds
+from drugseqpy.utils import make_dummy_screen
+
+# Build object
+counts, obs = make_dummy_screen(n_genes=500, n_compounds=8)
+dsd = ds.create_drugseq_object(counts=counts, obs=obs)
+
+# QC
+ds.compute_qc_metrics(dsd, inplace=True)
+ds.compute_plate_qc(dsd, inplace=True)
+ds.plot_qc_summary(dsd)
+ds.plot_zprime(dsd)
+
+# Filter
+dsd = ds.filter_samples(dsd, min_umi=5000, max_pct_mito=20)
+dsd = ds.filter_genes(dsd, min_count=5, group_aware=True)
+
+# Normalize (limma_voom recommended for Drug-seq)
+ds.normalize_counts(dsd, method='limma_voom', inplace=True)
+
+# Batch correction + dimensionality reduction
+ds.run_pca(dsd, inplace=True)
+ds.correct_batch(dsd, batch_col='plate_id', method='harmony', inplace=True)
+ds.run_umap(dsd, use_harmony=True, inplace=True)
+ds.embed_dmso(dsd, inplace=True)   # perturbation score
+
+# Differential expression (all compounds vs DMSO)
+ds.compute_multi_de(dsd, method='ols_voom', n_jobs=4, inplace=True)
+de_summary = ds.summarise_de(dsd)
+
+# Screen-level analysis
+ds.plot_screen_overview(dsd)
+ds.plot_screen_heatmap(dsd, n_top=50)
+compound_umap = ds.compute_compound_umap(dsd)
+network = ds.compute_compound_similarity_network(dsd)
+
+# Dose-response (lmfit, drc equivalent)
+dr = ds.fit_dose_response(dsd, compound='CmpdA')
+ds.plot_dr_panel(dr, dsd, compound='CmpdA')
+
+# GSEA
+ds.run_gsea(dsd, gene_sets='MSigDB_Hallmark_2020', inplace=True)
+```
+
+## Notebooks
+
+| Notebook | Contents |
+|---|---|
+| `01_QC_Workflow.ipynb` | Metadata validation, per-sample QC, plate QC (Z'), MDS, normalization comparison (RLE), group-aware gene filtering |
+| `02_Screen_Analysis.ipynb` | Batch correction, PCA/UMAP, DMSO-anchored perturbation scoring, multi-compound DE, volcano/MA plots, screen heatmap, compound similarity networks, GSEA |
+| `03_Dose_Response_Cheminformatics.ipynb` | LL4/Weibull fitting (lmfit), AIC model selection, EC50 CIs, multi-compound DR, SMILES retrieval from PubChem, RDKit descriptors, SAR modelling |
+
+## Module overview
+
+| Module | Key functions |
+|---|---|
+| `core` | `create_drugseq_object`, `merge_drugseq_objects`, `DrugSeqData` |
+| `qc` | `compute_qc_metrics`, `compute_plate_qc`, `compute_group_qc`, `compute_replicate_icc`, `select_robust_controls`, `check_zero_inflation`, `validate_metadata` |
+| `normalization` | `normalize_counts` (log1p/CPM/TMM/limma_voom), `compare_normalizations` |
+| `filtering` | `filter_samples`, `filter_genes` (group-aware) |
+| `batch` | `correct_batch` (Harmony / ComBat / DMSO-regression) |
+| `reduction` | `run_pca`, `run_umap`, `embed_dmso`, `cluster_compounds` |
+| `differential` | `run_de`, `compute_multi_de`, `summarise_de` |
+| `screen` | `aggregate_by_de`, `compute_compound_umap`, `compute_compound_fingerprint`, `compute_compound_similarity_network`, `plot_screen_overview`, `plot_screen_heatmap` |
+| `dose_response` | `fit_dose_response`, `compute_multi_dr`, `plot_dr_panel` |
+| `enrichment` | `run_gsea`, `run_ora`, `connectivity_score` |
+| `plots` | `plot_qc_summary`, `plot_plate_heatmap`, `plot_zprime`, `plot_mds`, `plot_rle`, `plot_embedding`, `plot_volcano`, `plot_ma`, `plot_norm_comparison`, `plot_compound_umap` |
+
+## macpie / DRUGseqR mapping
+
+| R / macpie function | Python equivalent |
+|---|---|
+| `computeQCMetrics()` | `compute_qc_metrics()` |
+| `computePlateQC()` | `compute_plate_qc()` |
+| `macpie::compute_qc_metrics()` group-level | `compute_group_qc()` |
+| `macpie::plot_mds()` | `plot_mds()` |
+| `macpie::plot_rle()` | `plot_rle()` |
+| `macpie::filter_genes_by_expression()` | `filter_genes(group_aware=True)` |
+| `macpie::select_robust_controls()` | `select_robust_controls()` |
+| `macpie::aggregate_by_de()` | `aggregate_by_de()` |
+| `macpie::plot_multi_de()` | `plot_screen_heatmap()` |
+| `normalizeCounts(method="limma_voom")` | `normalize_counts(method='limma_voom')` |
+| `runDE(method="limma")` | `run_de(method='ols_voom')` |
+| `fitDoseResponse()` (drc) | `fit_dose_response()` (lmfit) |
+| `connectivityScore()` | `connectivity_score()` |
+| `toSeurat()` / `fromSeurat()` | native AnnData (no bridge needed) |
+| `computeReplicateICC()` | `compute_replicate_icc()` (novel) |
+| `plotNormComparison()` | `plot_norm_comparison()` (novel) |
+| `computeCompoundFingerprint()` | `compute_compound_fingerprint()` (novel) |
+| `computeCompoundSimilarityNetwork()` | `compute_compound_similarity_network()` (novel) |
+| `plotScreenOverview()` | `plot_screen_overview()` (novel) |
+
+## Running tests
+
+```bash
+pip install "drugseqpy[dev]"
+pytest tests/ -v
+```
+
+## Dependencies
+
+**Required**: anndata, scanpy, numpy, pandas, scipy, matplotlib, seaborn, plotly, pydeseq2, statsmodels, scikit-learn, umap-learn, harmonypy, gseapy, lmfit, tqdm, joblib, requests
+
+**Optional (full)**: inmoose (ComBat), rdkit (cheminformatics), igraph (compound networks), decoupler (pathway activity)
+
+## License
+
+MIT
