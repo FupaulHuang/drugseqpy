@@ -148,6 +148,48 @@ class DrugSeqData:
             lines.append(f"  Reductions: {', '.join(reductions)}")
         return "\n".join(lines)
 
+    def write(self, filename: str | Path, compression: str | None = "gzip", **kwargs) -> None:
+            """
+            Write the object to an .h5ad file.
+            
+            Parameters
+            ----------
+            filename : str or Path
+                File path to save the data (e.g., "data.h5ad").
+            compression : str or None, default="gzip"
+                Compression method for the HDF5 file.
+            **kwargs
+                Additional arguments passed to `anndata.AnnData.write_h5ad`.
+            """
+            # (可选) 在保存前打个思想钢印，记录这原本是一个 DrugSeqData 对象
+            self._adata.uns["__is_drugseq_data__"] = True 
+            
+            # 直接调用底层的保存方法
+            self._adata.write_h5ad(filename, compression=compression, **kwargs)
+
+    @classmethod
+    def read_h5ad(cls, filename: str | Path, backed: str | None = None, **kwargs) -> "DrugSeqData":
+        """
+        Read an .h5ad file and initialize a DrugSeqData object directly.
+        
+        Parameters
+        ----------
+        filename : str or Path
+            File path to the .h5ad file.
+        backed : str or None, default=None
+            If 'r', load AnnData in backed mode (memory efficient).
+        **kwargs
+            Additional arguments passed to `anndata.read_h5ad`.
+            
+        Returns
+        -------
+        DrugSeqData
+        """
+        # 1. 使用 anndata 原生函数读取文件
+        adata = ad.read_h5ad(filename, backed=backed, **kwargs)
+        
+        # 2. 将读取到的 AnnData 包装成当前的类 (DrugSeqData) 并返回
+        return cls(adata)
 
 # ---------------------------------------------------------------------------
 # create_drugseq_object

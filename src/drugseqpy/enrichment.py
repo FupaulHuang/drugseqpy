@@ -12,13 +12,36 @@ import pandas as pd
 
 from .core import DrugSeqData
 
+def _sanitize_df_for_h5ad(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    清洗 DataFrame，使其格式能够被 anndata.write_h5ad() 安全保存。
+    参考 Scanpy 处理复杂 metadata 的逻辑。
+    """
+    if df is None or df.empty:
+        return df
+        
+    df = df.copy()
+    for col in df.columns:
+        # 1. 检查并处理列表/元组（例如 GSEA 结果中的 leading_edge 基因集）
+        has_list = df[col].apply(lambda x: isinstance(x, (list, tuple, np.ndarray))).any()
+        if has_list:
+            df[col] = df[col].apply(
+                lambda x: ";".join(map(str, x)) if isinstance(x, (list, tuple, np.ndarray)) else x
+            )
+            
+        # 2. 将 object 类型的列（通常包含混合类型的字符串和 NaN）强制转换为纯字符串
+        if df[col].dtype == "object":
+            df[col] = df[col].fillna("").astype(str)
+            
+    return df
+
 
 # ---------------------------------------------------------------------------
 # run_gsea
 # ---------------------------------------------------------------------------
 
 def run_gsea(
-    dsd: DrugSeqData,
+    dsd: DrugSeqData, # 这里假设已经引入了相关的类型提示
     gene_sets: str | dict | list = "MSigDB_Hallmark_2020",
     compounds: list[str] | None = None,
     rank_by: str = "stat",
@@ -80,7 +103,10 @@ def run_gsea(
                 outdir=None,
                 verbose=False,
             )
-            gsea_results[cmpd] = res.res2d
+            # 🚀 在存入前清洗数据
+            clean_df = _sanitize_df_for_h5ad(res.res2d)
+            gsea_results[cmpd] = clean_df
+            
         except Exception as e:
             warnings.warn(f"  GSEA failed for '{cmpd}': {e}")
 
@@ -136,7 +162,10 @@ def run_ora(
         outdir=None,
         verbose=False,
     )
-    return res.res2d
+    
+    # 🚀 在返回前清洗数据
+    clean_df = _sanitize_df_for_h5ad(res.res2d)
+    return clean_df
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +237,111 @@ def connectivity_score(
         return norm_A.T @ norm_B
     else:
         return np.corrcoef(sig_mat.T, B.T)[:len(compounds), len(compounds):]
+    
+import warnings
+import pandas as pd
+import numpy as np
+
+# 确保 _sanitize_df_for_h5ad 已经在这个文件顶部定义过了
+# from .utils import _sanitize_df_for_h5ad 
+
+def run_go_enrichment(
+    dsd: "DrugSeqData",
+    compounds: list[str] | str | None = None,
+    ontologies: list[str] | str = [
+        "GO_Biological_Process_2023",
+        "GO_Molecular_Function_2023",
+        "GO_Cellular_Component_2023"
+    ],
+    fdr_threshold: float = 0.05,
+    lfc_threshold: float = 0.5,
+    species: str = "Human",
+    inplace: bool = True,
+) -> "DrugSeqData" | None:
+    """
+    Run Gene Ontology (GO) enrichment analysis for significantly differentially expressed genes.
+
+    Parameters
+    ----------
+    dsd : DrugSeqData object containing DE results.
+    compounds : List of compound names to analyze. If None, runs all compounds in de_results.
+    ontologies : List of GO databases to query (from Enrichr).
+    fdr_threshold : Adjusted p-value cutoff for defining significant genes.
+    lfc_threshold : Absolute log2 fold-change cutoff for defining significant genes.
+    species : Organism name ('Human', 'Mouse', etc.).
+    inplace : If True, stores results in dsd.adata.uns['go']. If False, returns a copied object.
+
+    Returns
+    -------
+    DrugSeqData (if inplace=False) or None (if inplace=True).
+    """
+    try:
+        import gseapy as gp
+    except ImportError:
+        raise ImportError("gseapy required. Install: pip install gseapy")
+
+    # 处理 inplace 逻辑
+    if not inplace:
+        # 注意：这里假设你的 DrugSeqData 已经 import 或者在同一个文件中
+        dsd = type(dsd)(dsd.adata.copy())
+
+    de = dsd.adata.uns.get("de_results", {})
+    if not de:
+        raise ValueError("de_results empty. Run DE analysis first.")
+
+    # 格式化输入参数
+    if compounds is None:
+        compounds = list(de.keys())
+    elif isinstance(compounds, str):
+        compounds = [compounds]
+
+    if isinstance(ontologies, str):
+        ontologies = [ontologies]
+
+    print(f"Running GO enrichment for {len(compounds)} compound(s)...")
+
+    # 获取或初始化 uns 中的 go 字典
+    go_results = dsd.adata.uns.get("go", {})
+
+    for cmpd in compounds:
+        if cmpd not in de:
+            warnings.warn(f"'{cmpd}' not found in de_results. Skipping.")
+            continue
+
+        df = de[cmpd]
+        
+        # 提取显著差异表达基因
+        sig_genes = df.loc[
+            df["padj"].notna() &
+            (df["padj"] < fdr_threshold) &
+            (df["logFC"].abs() >= lfc_threshold),
+            "gene"
+        ].tolist()
+
+        if not sig_genes:
+            warnings.warn(f"  No significant genes for '{cmpd}' at given thresholds. Skipping.")
+            continue
+
+        try:
+            # 调用 gseapy 的 Enrichr 接口
+            res = gp.enrichr(
+                gene_list=sig_genes,
+                gene_sets=ontologies,
+                organism=species,
+                outdir=None,  # 不在本地生成冗余的文件夹
+                verbose=False,
+            )
+            
+            # 🚀 核心步骤：清洗 DataFrame，把 list 转成字符串，防止 HDF5 报错
+            clean_df = _sanitize_df_for_h5ad(res.res2d)
+            
+            go_results[cmpd] = clean_df
+            
+        except Exception as e:
+            warnings.warn(f"  GO enrichment failed for '{cmpd}': {e}")
+
+    # 将结果保存回 AnnData 对象
+    dsd.adata.uns["go"] = go_results
+    print(f"GO enrichment complete. Results stored in adata.uns['go'].")
+    
+    return dsd if not inplace else None

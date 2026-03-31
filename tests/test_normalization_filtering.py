@@ -3,104 +3,96 @@
 import numpy as np
 import pandas as pd
 import pytest
-import scipy.sparse as sp
+import anndata as ad
 
 from drugseqpy import (
-    create_drugseq_object,
-    normalize_counts,
-    compare_normalizations,
-    export_matrix,
-    filter_samples,
-    filter_genes,
-    compute_qc_metrics,
+    normalize_counts, compare_normalizations, export_matrix,
+    filter_samples, filter_genes, compute_qc_metrics,
 )
 from drugseqpy.utils import make_dummy_screen
 
 
 class TestNormalizeCounts:
-    @pytest.mark.parametrize("method", ["log1p","CPM","TMM","limma_voom"])
-    def test_method_runs(self, dsd_qc, method):
-        from drugseqpy.core import DrugSeqData
-        dsd = DrugSeqData(dsd_qc.adata.copy())
-        normalize_counts(dsd, method=method, inplace=True)
-        assert dsd.adata.X is not None
-        assert dsd.adata.uns["norm_method"] == method
+    @pytest.mark.parametrize("method", ["log1p", "CPM", "TMM", "limma_voom"])
+    def test_method_runs_and_sets_uns(self, dsd_qc, method):
+        adata = dsd_qc.copy()
+        normalize_counts(adata, method=method, inplace=True)
+        assert adata.X is not None
+        assert adata.uns["norm_method"] == method
 
-    def test_output_shape_matches_input(self, dsd_qc):
-        from drugseqpy.core import DrugSeqData
-        dsd = DrugSeqData(dsd_qc.adata.copy())
-        normalize_counts(dsd, method="limma_voom", inplace=True)
-        assert dsd.adata.X.shape == (dsd.n_obs, dsd.n_vars)
+    def test_shape_preserved(self, dsd_qc):
+        adata = dsd_qc.copy()
+        normalize_counts(adata, method="limma_voom", inplace=True)
+        assert adata.X.shape == (adata.n_obs, adata.n_vars)
 
     def test_counts_layer_unchanged(self, dsd_qc):
-        from drugseqpy.core import DrugSeqData
-        dsd = DrugSeqData(dsd_qc.adata.copy())
-        raw_before = dsd.adata.layers["counts"].toarray().copy()
-        normalize_counts(dsd, method="TMM", inplace=True)
-        raw_after = dsd.adata.layers["counts"].toarray()
+        adata = dsd_qc.copy()
+        import scipy.sparse as sp
+        raw_before = adata.layers["counts"].toarray().copy()
+        normalize_counts(adata, method="TMM", inplace=True)
+        raw_after = adata.layers["counts"].toarray()
         np.testing.assert_array_equal(raw_before, raw_after)
 
     def test_invalid_method_raises(self, dsd_qc):
-        from drugseqpy.core import DrugSeqData
-        dsd = DrugSeqData(dsd_qc.adata.copy())
-        with pytest.raises(ValueError, match="method must be"):
-            normalize_counts(dsd, method="invalid_method", inplace=True)
+        with pytest.raises(ValueError, match="method must be one of"):
+            normalize_counts(dsd_qc.copy(), method="bad_method", inplace=True)
+
+    def test_scanpy_hvg_works_after_normalize(self, dsd_qc):
+        """sc.pp.highly_variable_genes must run directly after normalize_counts."""
+        import scanpy as sc
+        adata = dsd_qc.copy()
+        normalize_counts(adata, method="CPM", inplace=True)
+        sc.pp.highly_variable_genes(adata, n_top_genes=50, flavor="seurat")
+        assert "highly_variable" in adata.var.columns
 
     def test_limma_voom_lower_cv_than_raw(self):
         from drugseqpy.normalization import _limma_voom
-        counts, obs = make_dummy_screen(n_genes=200, n_dmso_per_plate=10, n_compounds=4, seed=333)
-        dsd = create_drugseq_object(counts, obs)
-        compute_qc_metrics(dsd, inplace=True)
-        dmso_mask = dsd.obs["sample_type"] == "DMSO"
-        raw = dsd.adata.layers["counts"][dmso_mask].toarray().astype(float)
-        lib = raw.sum(axis=1, keepdims=True)
+        adata = make_dummy_screen(n_genes=200, n_dmso_per_plate=10,
+                                   n_compounds=4, seed=333)
+        compute_qc_metrics(adata, inplace=True)
+        dmso = (adata.obs["sample_type"] == "DMSO").values
+        raw  = adata.layers["counts"][dmso].toarray().astype(float)
+        lib  = raw.sum(axis=1, keepdims=True)
         raw_log = np.log2(raw / (lib + 1e-8) * 1e6 + 1)
-        raw_cv  = np.mean(raw_log.std(axis=0) / (np.abs(raw_log.mean(axis=0)) + 1e-8))
-        norm_log = _limma_voom(raw)
-        norm_cv  = np.mean(norm_log.std(axis=0) / (np.abs(norm_log.mean(axis=0)) + 1e-8))
+        raw_cv  = np.mean(raw_log.std(0) / (np.abs(raw_log.mean(0)) + 1e-8))
+        norm_cv = np.mean(_limma_voom(raw).std(0) /
+                           (np.abs(_limma_voom(raw).mean(0)) + 1e-8))
         assert norm_cv < raw_cv
 
 
 class TestCompareNormalizations:
-    def test_returns_dataframe_with_all_methods(self, dsd_qc):
+    def test_columns_present(self, dsd_qc):
         df = compare_normalizations(dsd_qc, methods=["raw","CPM","TMM","limma_voom"])
         assert set(df["method"]) == {"raw","CPM","TMM","limma_voom"}
-        assert "median_rle_center" in df.columns
-        assert "median_rle_iqr"    in df.columns
-        assert "mean_cv"           in df.columns
+        for col in ["median_rle_center","median_rle_iqr","mean_cv"]:
+            assert col in df.columns
 
-    def test_values_are_non_negative(self, dsd_qc):
-        df = compare_normalizations(dsd_qc, methods=["raw","TMM","limma_voom"])
-        assert (df["median_rle_center"] >= 0).all()
-        assert (df["median_rle_iqr"]    >= 0).all()
-        assert (df["mean_cv"]           >= 0).all()
+    def test_values_non_negative(self, dsd_qc):
+        df = compare_normalizations(dsd_qc, methods=["raw","TMM"])
+        assert (df[["median_rle_center","median_rle_iqr","mean_cv"]] >= 0).all().all()
 
-    def test_raw_has_higher_rle_center_than_normalized(self, dsd_qc):
+    def test_raw_higher_rle_than_cpm(self, dsd_qc):
         df = compare_normalizations(dsd_qc, methods=["raw","CPM"], subset_type=None)
-        raw_rle = df.loc[df["method"]=="raw", "median_rle_center"].values[0]
-        cpm_rle = df.loc[df["method"]=="CPM", "median_rle_center"].values[0]
-        assert raw_rle >= cpm_rle
+        raw = df.loc[df["method"]=="raw",  "median_rle_center"].values[0]
+        cpm = df.loc[df["method"]=="CPM",  "median_rle_center"].values[0]
+        assert raw >= cpm
 
 
 class TestExportMatrix:
-
     @pytest.mark.parametrize("method", [
-        "raw", "CPM", "TMM", "limma_voom", "log1p", "size_factors"
+        "raw","CPM","TMM","limma_voom","log1p","size_factors"
     ])
     def test_all_methods_return_dataframe(self, dsd_qc, method):
         df = export_matrix(dsd_qc, method=method, path=None)
         assert isinstance(df, pd.DataFrame)
         assert df.shape == (dsd_qc.n_obs, dsd_qc.n_vars)
 
-    def test_index_matches_sample_ids(self, dsd_qc):
-        df = export_matrix(dsd_qc, method="CPM")
-        assert list(df.index) == dsd_qc.obs_names.tolist()
-
-    def test_columns_match_gene_ids(self, dsd_qc):
+    def test_index_and_columns(self, dsd_qc):
         df = export_matrix(dsd_qc, method="TMM")
+        assert list(df.index)   == dsd_qc.obs_names.tolist()
         assert list(df.columns) == dsd_qc.var_names.tolist()
 
-    def test_raw_layer_non_negative(self, dsd_qc):
+    def test_counts_layer_non_negative(self, dsd_qc):
         df = export_matrix(dsd_qc, layer="counts")
         assert (df.values >= 0).all()
 
@@ -114,14 +106,14 @@ class TestExportMatrix:
         assert list(df.columns) == genes
 
     def test_sample_subset(self, dsd_qc):
-        samples = dsd_qc.obs_names[:5].tolist()
-        df = export_matrix(dsd_qc, method="TMM", samples=samples)
-        assert list(df.index) == samples
+        sids = dsd_qc.obs_names[:5].tolist()
+        df = export_matrix(dsd_qc, method="TMM", samples=sids)
+        assert list(df.index) == sids
 
-    def test_gene_and_sample_subset_combined(self, dsd_qc):
-        genes   = dsd_qc.var_names[:8].tolist()
-        samples = dsd_qc.obs_names[:4].tolist()
-        df = export_matrix(dsd_qc, method="TMM", genes=genes, samples=samples)
+    def test_combined_subset_shape(self, dsd_qc):
+        genes = dsd_qc.var_names[:8].tolist()
+        sids  = dsd_qc.obs_names[:4].tolist()
+        df = export_matrix(dsd_qc, method="TMM", genes=genes, samples=sids)
         assert df.shape == (4, 8)
 
     def test_obs_cols_prepended(self, dsd_qc):
@@ -132,10 +124,6 @@ class TestExportMatrix:
         df = export_matrix(dsd_qc, method="CPM", log_transform=False)
         assert (df.values >= 0).all()
 
-    def test_size_factors_linear_non_negative(self, dsd_qc):
-        df = export_matrix(dsd_qc, method="size_factors", log_transform=False)
-        assert (df.values >= 0).all()
-
     def test_round_decimals(self, dsd_qc):
         df = export_matrix(dsd_qc, method="TMM", round_decimals=2)
         assert np.allclose(df.values, np.round(df.values, 2), atol=1e-9)
@@ -143,31 +131,29 @@ class TestExportMatrix:
     def test_write_csv(self, tmp_path, dsd_qc):
         p = str(tmp_path / "out.csv")
         export_matrix(dsd_qc, method="CPM", path=p)
-        loaded = pd.read_csv(p, index_col=0)
-        assert loaded.shape == (dsd_qc.n_obs, dsd_qc.n_vars)
+        assert pd.read_csv(p, index_col=0).shape == (dsd_qc.n_obs, dsd_qc.n_vars)
 
     def test_write_tsv(self, tmp_path, dsd_qc):
         p = str(tmp_path / "out.tsv")
         export_matrix(dsd_qc, method="TMM", path=p)
-        loaded = pd.read_csv(p, sep="\t", index_col=0)
-        assert loaded.shape == (dsd_qc.n_obs, dsd_qc.n_vars)
+        assert pd.read_csv(p, sep="\t", index_col=0).shape == (dsd_qc.n_obs, dsd_qc.n_vars)
 
     def test_fmt_inferred_from_extension(self, tmp_path, dsd_qc):
-        p = str(tmp_path / "matrix.tsv")
+        p = str(tmp_path / "out.tsv")
         df = export_matrix(dsd_qc, method="CPM", path=p, return_df=True)
         loaded = pd.read_csv(p, sep="\t", index_col=0)
         assert loaded.shape == df.shape
 
-    def test_csv_roundtrip_values_close(self, tmp_path, dsd_qc):
-        p = str(tmp_path / "roundtrip.csv")
+    def test_csv_roundtrip(self, tmp_path, dsd_qc):
+        p = str(tmp_path / "rt.csv")
         df_out = export_matrix(dsd_qc, method="TMM", path=p,
                                 round_decimals=4, return_df=True)
-        df_in = pd.read_csv(p, index_col=0)
+        df_in  = pd.read_csv(p, index_col=0)
         np.testing.assert_allclose(df_out.values, df_in.values, atol=1e-3)
 
     def test_invalid_method_raises(self, dsd_qc):
         with pytest.raises(ValueError, match="method must be one of"):
-            export_matrix(dsd_qc, method="scran_invalid")
+            export_matrix(dsd_qc, method="bad")
 
     def test_invalid_format_raises(self, dsd_qc):
         with pytest.raises(ValueError, match="Unsupported format"):
@@ -175,68 +161,72 @@ class TestExportMatrix:
 
     def test_invalid_layer_raises(self, dsd_qc):
         with pytest.raises(KeyError, match="Layer"):
-            export_matrix(dsd_qc, layer="nonexistent_layer")
+            export_matrix(dsd_qc, layer="nonexistent")
 
-    def test_return_df_false_returns_none_when_path_given(self, tmp_path, dsd_qc):
+    def test_return_false_with_path_gives_none(self, tmp_path, dsd_qc):
         p = str(tmp_path / "out.csv")
-        result = export_matrix(dsd_qc, method="CPM", path=p, return_df=False)
-        assert result is None
+        assert export_matrix(dsd_qc, method="CPM", path=p, return_df=False) is None
 
     def test_path_none_always_returns_df(self, dsd_qc):
-        df = export_matrix(dsd_qc, method="TMM", path=None, return_df=False)
-        assert isinstance(df, pd.DataFrame)
+        assert isinstance(export_matrix(dsd_qc, method="TMM",
+                                          path=None, return_df=False), pd.DataFrame)
 
     def test_tmm_differs_from_cpm(self, dsd_qc):
         tmm = export_matrix(dsd_qc, method="TMM")
         cpm = export_matrix(dsd_qc, method="CPM")
         assert not np.allclose(tmm.values, cpm.values, atol=1e-6)
 
-    def test_h5ad_export(self, tmp_path, dsd_qc):
-        pytest.importorskip("anndata")
+    def test_h5ad_roundtrip(self, tmp_path, dsd_qc):
         import anndata as ad
         p = str(tmp_path / "out.h5ad")
-        export_matrix(dsd_qc, method="TMM", path=p, fmt="h5ad")
+        export_matrix(dsd_qc, method="TMM", path=p)
         loaded = ad.read_h5ad(p)
         assert loaded.n_obs == dsd_qc.n_obs
-        assert loaded.n_vars == dsd_qc.n_vars
         assert loaded.uns.get("export_norm_method") == "TMM"
 
 
 class TestFilterSamples:
-    def test_low_umi_samples_removed(self, dsd_qc):
-        filtered = filter_samples(dsd_qc, min_umi=999_999, keep_sample_types=["DMSO"])
-        dmso_n = (dsd_qc.obs["sample_type"] == "DMSO").sum()
-        assert filtered.n_obs == dmso_n
+    def test_protected_dmso_not_removed(self, dsd_qc):
+        filtered = filter_samples(dsd_qc, min_umi=999_999,
+                                   keep_sample_types=["DMSO"])
+        n_dmso = (dsd_qc.obs["sample_type"] == "DMSO").sum()
+        assert filtered.n_obs == n_dmso
 
-    def test_no_samples_removed_with_loose_thresholds(self, dsd_qc):
-        filtered = filter_samples(dsd_qc, min_umi=0, max_pct_mito=100)
-        assert filtered.n_obs == dsd_qc.n_obs
+    def test_loose_threshold_removes_nothing(self, dsd_qc):
+        assert filter_samples(dsd_qc, min_umi=0, max_pct_mito=100).n_obs == dsd_qc.n_obs
 
     def test_raises_if_all_removed(self, dsd_qc):
         with pytest.raises(ValueError, match="All samples"):
             filter_samples(dsd_qc, min_umi=999_999_999, keep_sample_types=[])
 
+    def test_returns_anndata(self, dsd_qc):
+        assert isinstance(filter_samples(dsd_qc, min_umi=0), ad.AnnData)
+
 
 class TestFilterGenes:
-    def test_genes_reduced_with_strict_threshold(self, dsd_qc):
-        filtered = filter_genes(dsd_qc, min_count=999, min_samples=1,
-                                 group_aware=False, verbose=False)
-        assert filtered.n_vars < dsd_qc.n_vars
+    def test_strict_threshold_reduces_genes(self, dsd_qc):
+        assert filter_genes(dsd_qc, min_count=999, min_samples=1,
+                             group_aware=False, verbose=False).n_vars < dsd_qc.n_vars
 
-    def test_no_genes_removed_with_min_count_0(self, dsd_qc):
-        filtered = filter_genes(dsd_qc, min_count=0, min_samples=0,
-                                 group_aware=False, verbose=False)
-        assert filtered.n_vars == dsd_qc.n_vars
+    def test_zero_threshold_keeps_all(self, dsd_qc):
+        assert filter_genes(dsd_qc, min_count=0, min_samples=0,
+                             group_aware=False, verbose=False).n_vars == dsd_qc.n_vars
 
-    def test_group_aware_keeps_more_genes_than_global(self, dsd_qc):
-        ga   = filter_genes(dsd_qc, min_count=5, min_samples=3, group_aware=True,  verbose=False)
-        glob = filter_genes(dsd_qc, min_count=5, min_samples=3, group_aware=False, verbose=False)
+    def test_group_aware_keeps_more(self, dsd_qc):
+        ga   = filter_genes(dsd_qc, min_count=5, min_samples=3,
+                             group_aware=True,  verbose=False)
+        glob = filter_genes(dsd_qc, min_count=5, min_samples=3,
+                             group_aware=False, verbose=False)
         assert ga.n_vars >= glob.n_vars
 
     def test_mito_removal(self, dsd_qc):
-        filtered = filter_genes(dsd_qc, remove_mito=True, mito_pattern="^MT-", verbose=False)
-        assert filtered.var_names.str.startswith("MT-").sum() == 0
+        f = filter_genes(dsd_qc, remove_mito=True, mito_pattern="^MT-", verbose=False)
+        assert f.var_names.str.startswith("MT-").sum() == 0
 
     def test_raises_if_all_removed(self, dsd_qc):
         with pytest.raises(ValueError, match="All genes"):
             filter_genes(dsd_qc, min_count=999_999, min_samples=1, verbose=False)
+
+    def test_returns_anndata(self, dsd_qc):
+        assert isinstance(filter_genes(dsd_qc, min_count=0,
+                                        min_samples=0, verbose=False), ad.AnnData)

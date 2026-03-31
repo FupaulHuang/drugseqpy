@@ -107,18 +107,18 @@ def _correct_harmony(dsd, batch_col, n_pcs, theta, random_state):
             "'X_pca' not found in obsm. Run run_pca() before correct_batch()."
         )
 
-    pca_emb = dsd.adata.obsm["X_pca"][:, :n_pcs]
+    pca_emb = dsd.adata.obsm["X_pca"][:, :n_pcs].copy()
     meta    = dsd.obs[[batch_col]]
 
     ho = hm.run_harmony(
-        pca_emb,
+        pca_emb.T,
         meta,
         batch_col,
         theta=theta,
         random_state=random_state,
         verbose=False,
     )
-    dsd.adata.obsm["X_pca_harmony"] = ho.Z_corr.T.astype(np.float32)
+    dsd.adata.obsm["X_pca_harmony"] = ho.Z_corr.astype(np.float32)
     print(f"  Harmony corrected PCA stored in obsm['X_pca_harmony'] ({n_pcs} dims).")
 
 

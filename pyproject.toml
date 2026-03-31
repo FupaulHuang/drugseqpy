@@ -1,10 +1,14 @@
+# [build-system]
+# requires = ["setuptools>=68", "wheel"]
+# build-backend = "setuptools.backends.legacy:build"
+
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "drugseqpy"
-version = "0.2.0"
+version = "0.1.0"
 description = "Quality control and analysis of DRUG-seq / HTTr high-throughput transcriptomics data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -45,6 +49,10 @@ dependencies = [
     "tqdm>=4.66",
     "joblib>=1.3",
     "requests>=2.31",
+
+    # Network analysis
+    "igraph>=1.0.0",
+    "leidenalg>=0.11.0",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +73,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["drugseqpy*"]
 
 [tool.ruff]
