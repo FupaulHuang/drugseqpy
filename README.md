@@ -25,14 +25,19 @@ DRUGseqPy follows scanpy conventions throughout: the central data structure is a
 ## Installation
 
 ```bash
+conda create -n drugseqpy python==3.10.0
+source activate drugseqpy
+conda install git
+
 # Core
-pip install drugseqpy
+#pip install drugseqpy
+pip install git+https://github.com/FupaulHuang/drugseqpy.git
 
 # Full (includes rdkit via conda, igraph, decoupler)
-pip install "drugseqpy[full]"
+#pip install "drugseqpy[full]"
 
 # Development
-pip install "drugseqpy[dev]"
+#pip install "drugseqpy[dev]"
 ```
 
 For rdkit (cheminformatics):

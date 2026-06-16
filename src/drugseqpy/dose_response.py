@@ -252,18 +252,37 @@ def compute_multi_dr(
 
 def plot_dr_panel(
     dr_result: pd.DataFrame,
-    dsd: DrugSeqData,
+    dsd, # DrugSeqData
     compound: str,
     n_genes: int = 9,
     dose_col: str = "dose",
+    log_x: bool = True,  # 坐标轴对数/线性切换开关
     ncol: int = 3,
     figsize: tuple | None = None,
 ) -> plt.Figure:
     """
     Multi-gene dose-response panel plot.
-
     Overlays fitted lmfit curves on observed data points.
+    Supports toggling between log and linear X-axis scaling.
     """
+    def _ll4(x, b, c, d, e):
+        """
+        标准的四参数对数逻辑模型 (4-Parameter Log-Logistic Model)
+        x: 药物浓度 (Dose)
+        b: 斜率 (Slope / Hill coefficient)
+        c: 谷底效应 (E0 / Bottom)
+        d: 峰顶效应 (Emax / Top)
+        e: 半数有效浓度 (EC50)
+        """
+        # 为了防止 x/e 带来的浮点数溢出，在底层计算时将其转换为对数相减
+        # 这在数学上等价于 c + (d-c) / (1 + (x/e)**b)
+        return c + (d - c) / (1 + np.exp(b * (np.log(x) - np.log(e))))
+    
+    _MODEL_FUNCS = {
+        "LL4": _ll4,
+        "LL.4": _ll4  # 兼容不同包的命名习惯
+    }
+
     conv = dr_result[dr_result["converged"].fillna(False)]\
                .sort_values("r_squared", ascending=False)
     if conv.empty:
@@ -277,6 +296,8 @@ def plot_dr_panel(
 
     obs = dsd.obs
     mask = obs["compound"].isin([compound, "DMSO"])
+    
+    # 提取原始浓度，DMSO 为 0
     doses = obs.loc[mask, dose_col].values.astype(float)
     doses[obs.loc[mask, "compound"].values == "DMSO"] = 0.0
 
@@ -293,31 +314,60 @@ def plot_dr_panel(
         gi   = dsd.var_names.get_loc(gene)
         y    = mat[:, gi]
 
-        dose_pos = doses.copy()
-        pos_min  = dose_pos[dose_pos > 0].min() if (dose_pos > 0).any() else 0.01
-        dose_pos[dose_pos == 0] = pos_min / 100.0
+        # ---------------- 1. 处理散点数据与坐标轴类型 ----------------
+        dose_plot = doses.copy()
+        pos_min = dose_plot[dose_plot > 0].min() if (dose_plot > 0).any() else 0.01
+        pseudo_zero = pos_min / 100.0  # 极小的非零基准点
+        
+        if log_x:
+            dose_plot[dose_plot == 0] = pseudo_zero
+            ax.set_xscale("log")
+        else:
+            # 线性轴：直接保留原始的 0
+            ax.set_xscale("linear")
 
-        ax.scatter(dose_pos, y, s=20, alpha=0.6, color="#2980B9", zorder=3)
-        ax.set_xscale("log")
+        # 绘制真实数据散点
+        ax.scatter(dose_plot, y, s=20, alpha=0.6, color="#2980B9", zorder=3)
 
-        # overlay fitted curve
+        # ---------------- 2. 生成并绘制拟合曲线 ----------------
+        # 恢复你原有的函数调用方式，去除干扰性的 globals() 判断
         mname = row.get("model", "LL4")
         func  = _MODEL_FUNCS.get(mname, _ll4)
-        d_seq = np.logspace(np.log10(dose_pos.min()),
-                             np.log10(dose_pos.max()), 100)
-        try:
-            y_fit = func(d_seq, b=row["slope"], c=row["E0"],
-                         d=row["Emax"], e=row["EC50"])
-            ax.plot(d_seq, y_fit, color="#C0392B", linewidth=1.5)
-        except Exception:
-            pass
 
+        # 无论坐标轴是 log 还是 linear，生成拟合点都使用 logspace 
+        # 这样确保数学计算上绝对不包含 0 (防止溢出)，且在低浓度区有足够密集的点让曲线平滑
+        d_seq = np.logspace(np.log10(pseudo_zero), np.log10(dose_plot.max()), 200)
+
+        try:
+            y_fit = func(d_seq, b=row["slope"], c=row["Emax"], d=row["E0"], e=row["EC50"])
+            
+            # 安全检查：只画出非 NaN 的正常数值点
+            valid_mask = np.isfinite(y_fit) & np.isfinite(d_seq)
+            if valid_mask.any():
+                ax.plot(d_seq[valid_mask], y_fit[valid_mask], color="#C0392B", linewidth=1.5, zorder=2)
+                
+        except Exception as err:
+            # 把错误直接打印在控制台，不再静默吞掉
+            print(f"⚠️ {gene} 拟合曲线绘制失败: {err}")
+
+        # ---------------- 3. 标签与美化 ----------------
         ec50_str = f"EC50={row['EC50']:.2g}" if np.isfinite(row["EC50"]) else ""
         r2_str   = f"R²={row['r_squared']:.2f}"
         ax.set_title(f"{gene}\n{ec50_str}  {r2_str}", fontsize=8)
-        ax.set_xlabel("Dose (log)", fontsize=7)
+        
+        xlabel_suffix = "(log)" if log_x else "(linear)"
+        ax.set_xlabel(f"Dose {xlabel_suffix}", fontsize=7)
         ax.set_ylabel("Expression", fontsize=7)
 
+        # ---------------- 4. 强制视图控制 (关键修复) ----------------
+        # 必须放在这一个子图所有 plot 和 scatter 动作执行完毕之后
+        if not log_x:
+            # 对于线性坐标，强制加上左右 5% 的物理留白
+            x_max = dose_plot.max()
+            margin = x_max * 0.05 if x_max > 0 else 0.1
+            ax.set_xlim(-margin, x_max + margin)
+
+    # 隐藏多余的子图网格
     for idx in range(len(top_genes), nrow * ncol):
         axes[idx // ncol][idx % ncol].set_visible(False)
 

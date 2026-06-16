@@ -437,38 +437,85 @@ def compute_replicate_icc(
 # select_robust_controls
 # ---------------------------------------------------------------------------
 
+import warnings
+import numpy as np
+
 def select_robust_controls(
-    dsd: DrugSeqData,
+    dsd, # 假设类型注解为 DrugSeqData
     neg_ctrl_label: str = "DMSO",
-    min_cor: float = 0.90,
+    min_cor: float | None = 0.90,
+    target_n: int | None = None,
+    absolute_min_cor: float = 0.75,  # 兜底阈值，防止极差的样本被选入
     method: str = "pearson",
 ) -> list[str]:
     """
-    Return sample IDs for high-quality control wells (TMMwsp Pearson ≥ min_cor).
-
-    Mirrors macpie's ``select_robust_controls()``.
+    Return sample IDs for high-quality control wells.
+    
+    If `target_n` is provided, automatically selects the top `target_n` controls 
+    with the highest mean correlation. The correlation threshold dynamically adapts 
+    but will not drop below `absolute_min_cor`. 
+    If `target_n` is None, falls back to the strict `min_cor` cutoff.
     """
     if "sample_type" not in dsd.obs.columns:
         raise KeyError("'sample_type' column required in obs.")
 
     mask = dsd.obs["sample_type"] == neg_ctrl_label
     ctrl_ids = dsd.obs_names[mask].tolist()
+    
     if len(ctrl_ids) < 3:
         warnings.warn("Fewer than 3 control wells; returning all.")
         return ctrl_ids
 
+    # 计算对数转换后的表达矩阵
     mat = np.log1p(
         dsd.adata[mask].layers["counts"].toarray().astype(float)
     )  # (n_ctrl, n_genes)
+    
+    # 计算皮尔逊相关系数矩阵
     cc = np.corrcoef(mat)
+    
+    # 计算每个样本与其他所有对照样本的平均相关性
     mean_cor = np.array([
         np.mean(np.delete(cc[i], i)) for i in range(len(ctrl_ids))
     ])
-    keep = [cid for cid, mc in zip(ctrl_ids, mean_cor) if mc >= min_cor]
-    print(
-        f"select_robust_controls: retaining {len(keep)} / {len(ctrl_ids)} "
-        f"control wells (min_cor={min_cor:.2f})."
-    )
+    
+    # 将 (样本ID, 平均相关系数) 打包，并按相关系数从大到小降序排列
+    scored_controls = sorted(zip(ctrl_ids, mean_cor), key=lambda x: x[1], reverse=True)
+    
+    # 动态阈值逻辑
+    if target_n is not None and target_n > 0:
+        # 防止 target_n 超过实际拥有的对照孔总数
+        actual_target = min(target_n, len(scored_controls))
+        
+        # 提取目标位置的那个样本的相关性，作为动态阈值
+        dynamic_threshold = scored_controls[actual_target - 1][1]
+        
+        # 确保动态计算出的阈值不低于我们能容忍的绝对底线
+        final_min_cor = max(dynamic_threshold, absolute_min_cor)
+        
+        keep = [cid for cid, mc in scored_controls if mc >= final_min_cor]
+        print(
+            f"select_robust_controls: dynamically selected {len(keep)} / {len(ctrl_ids)} "
+            f"control wells (target_n={target_n}, auto_min_cor={final_min_cor:.2f})."
+        )
+    
+    # 传统的静态阈值逻辑
+    else:
+        if min_cor is None:
+            min_cor = 0.90 # 默认安全阈值
+            
+        keep = [cid for cid, mc in scored_controls if mc >= min_cor]
+        print(
+            f"select_robust_controls: retaining {len(keep)} / {len(ctrl_ids)} "
+            f"control wells (min_cor={min_cor:.2f})."
+        )
+        
+    if len(keep) == 0:
+        warnings.warn(
+            "No robust controls found matching the criteria! "
+            "Consider lowering absolute_min_cor or checking data quality."
+        )
+        
     return keep
 
 
