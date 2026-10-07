@@ -12,5 +12,7 @@ dist/
 .vscode/
 
 # 单细胞大数据和中间产物
+/data/
+/examples/
 *.h5ad
 *.csv
