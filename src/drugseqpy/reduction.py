@@ -7,6 +7,7 @@ Functions
 ---------
 run_pca          : scanpy-backed PCA on normalized counts
 run_umap         : UMAP via umap-learn
+run_tsne         : t-SNE from PCA coordinates
 embed_dmso       : DMSO-anchored embedding (perturbation score)
 cluster_compounds: graph-based or k-means compound clustering
 """
@@ -89,7 +90,7 @@ def run_umap(
     n_neighbors: int = 15,
     min_dist: float = 0.3,
     metric: str = "euclidean",
-    use_harmony: bool = False,
+    use_rep: str = "X_pca",
     random_state: int = 42,
     inplace: bool = True,
 ) -> DrugSeqData | None:
@@ -101,7 +102,7 @@ def run_umap(
     Parameters
     ----------
     dims : number of PCs to use (int) or explicit list of PC indices
-    use_harmony : use Harmony-corrected PCA (obsm['X_pca_harmony']) if available
+    use_rep : key in ``obsm`` containing the coordinates used for neighbors
     """
     import scanpy as sc
 
@@ -109,18 +110,14 @@ def run_umap(
         dsd = DrugSeqData(dsd.adata.copy())
 
     adata = dsd.adata
-    if "X_pca" not in adata.obsm:
-        raise KeyError("PCA not found. Run run_pca() first.")
-
-    # select PCA representation
-    rep_key = "X_pca_harmony" if (use_harmony and "X_pca_harmony" in adata.obsm) \
-              else "X_pca"
+    if use_rep not in adata.obsm:
+        raise KeyError(f"'{use_rep}' not found in obsm. Run run_pca() first.")
 
     if isinstance(dims, int):
-        n_dims = min(dims, adata.obsm[rep_key].shape[1])
-        use_rep_slice = adata.obsm[rep_key][:, :n_dims]
+        n_dims = min(dims, adata.obsm[use_rep].shape[1])
+        use_rep_slice = adata.obsm[use_rep][:, :n_dims]
     else:
-        use_rep_slice = adata.obsm[rep_key][:, list(dims)]
+        use_rep_slice = adata.obsm[use_rep][:, list(dims)]
         n_dims = len(dims)
 
     # store a trimmed copy for neighbors
@@ -138,6 +135,58 @@ def run_umap(
     # clean up temporary key
     del adata.obsm["_pca_for_umap"]
     print(f"UMAP complete (n_neighbors={n_neighbors}, min_dist={min_dist}).")
+    return dsd if not inplace else None
+
+
+# ---------------------------------------------------------------------------
+# run_tsne
+# ---------------------------------------------------------------------------
+
+def run_tsne(
+    dsd: DrugSeqData,
+    dims: int | list[int] = 20,
+    perplexity: float = 30.0,
+    use_rep: str = "X_pca",
+    random_state: int = 42,
+    inplace: bool = True,
+) -> DrugSeqData | None:
+    """Compute t-SNE from PCA or another representation in ``obsm``."""
+    from sklearn.manifold import TSNE
+
+    if not inplace:
+        dsd = DrugSeqData(dsd.adata.copy())
+
+    adata = dsd.adata
+    if use_rep not in adata.obsm:
+        raise KeyError(f"'{use_rep}' not found in obsm. Run run_pca() first.")
+    if adata.n_obs < 3:
+        raise ValueError("t-SNE requires at least three samples.")
+
+    if isinstance(dims, int):
+        n_dims = min(dims, adata.obsm[use_rep].shape[1])
+        coordinates = adata.obsm[use_rep][:, :n_dims]
+    else:
+        coordinates = adata.obsm[use_rep][:, list(dims)]
+        n_dims = len(dims)
+
+    effective_perplexity = min(float(perplexity), float(adata.n_obs - 1))
+    embedding = TSNE(
+        n_components=2,
+        perplexity=effective_perplexity,
+        init="pca",
+        learning_rate="auto",
+        random_state=random_state,
+    ).fit_transform(np.asarray(coordinates, dtype=float))
+    adata.obsm["X_tsne"] = embedding.astype(np.float32)
+    adata.uns["tsne"] = {
+        "params": {
+            "use_rep": use_rep,
+            "n_dims": n_dims,
+            "perplexity": effective_perplexity,
+            "random_state": random_state,
+        }
+    }
+    print(f"t-SNE complete (perplexity={effective_perplexity:g}).")
     return dsd if not inplace else None
 
 

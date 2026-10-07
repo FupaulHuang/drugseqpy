@@ -105,6 +105,39 @@ class DrugSeqData:
         """Normalized expression matrix stored in adata.X."""
         return self._adata.X
 
+    def copy(self, deep: bool = True) -> "DrugSeqData":
+        """Return an independent copy of the wrapped AnnData object.
+
+        The method mirrors :meth:`anndata.AnnData.copy` while preserving the
+        ``DrugSeqData`` wrapper.  ``deep`` is accepted for AnnData API
+        compatibility; AnnData's copy operation is always deep for the
+        in-memory object used by this package.
+        """
+        del deep  # AnnData.copy has no shallow in-memory mode we need here.
+        return type(self)(self._adata.copy())
+
+    def __reduce_ex__(self, protocol):
+        """Keep multiprocessing/pickling stable with the AnnData proxy."""
+        del protocol
+        return (type(self), (self._adata.copy(),))
+
+    def __getattr__(self, name):
+        """Forward unknown attributes to the underlying AnnData object.
+
+        This keeps common Scanpy/AnnData idioms such as ``dsd.X``,
+        ``dsd.layers`` and ``dsd.n_obs`` usable while retaining the explicit
+        ``dsd.adata`` escape hatch.
+        """
+        adata = self.__dict__.get("_adata")
+        if adata is None:
+            raise AttributeError(name)
+        return getattr(adata, name)
+
+    @property
+    def __class__(self):
+        """Expose AnnData's class for legacy ``isinstance`` checks."""
+        return self._adata.__class__
+
     # -- subsetting --------------------------------------------------------
 
     def __getitem__(self, idx) -> "DrugSeqData":
@@ -291,6 +324,75 @@ def create_drugseq_object(
 
 
 # ---------------------------------------------------------------------------
+# activate_gene_names
+# ---------------------------------------------------------------------------
+
+def activate_gene_names(
+    dsd: DrugSeqData,
+    label_col: str = "gene_symbol",
+    *,
+    stable_id_col: str = "ensembl_id",
+    inplace: bool = True,
+) -> DrugSeqData | None:
+    """Use a gene-annotation column as the active AnnData variable names.
+
+    Before the first switch, the current ``var_names`` are preserved in
+    ``stable_id_col``. Missing or empty labels fall back to those stable IDs,
+    and duplicate active labels are made unique using AnnData's ``-1``,
+    ``-2``, ... suffix convention. Matrix values and column order are not
+    changed.
+
+    Parameters
+    ----------
+    dsd : DrugSeqData
+        Object whose gene labels will be changed.
+    label_col : str, default="gene_symbol"
+        Column in ``dsd.var`` to activate. Use ``stable_id_col`` here to
+        switch back to the preserved stable identifiers.
+    stable_id_col : str, default="ensembl_id"
+        Column used to preserve the original ``var_names`` and as the
+        fallback for missing labels.
+    inplace : bool, default=True
+        Modify ``dsd`` and return ``None``. If ``False``, modify and return an
+        independent copy.
+
+    Returns
+    -------
+    DrugSeqData or None
+        A modified copy when ``inplace=False``; otherwise ``None``.
+    """
+    if not isinstance(dsd, DrugSeqData):
+        raise TypeError("dsd must be a DrugSeqData object")
+    if not isinstance(label_col, str) or not label_col.strip():
+        raise ValueError("label_col must be a non-empty string")
+    if not isinstance(stable_id_col, str) or not stable_id_col.strip():
+        raise ValueError("stable_id_col must be a non-empty string")
+    if label_col not in dsd.var.columns and label_col != stable_id_col:
+        raise KeyError(f"dsd.var does not contain {label_col!r}")
+
+    target = dsd if inplace else dsd.copy()
+    adata = target.adata
+    if stable_id_col not in adata.var.columns:
+        adata.var[stable_id_col] = adata.var_names.astype(str)
+
+    labels = adata.var[label_col].astype("string").str.strip()
+    valid = labels.notna() & labels.ne("") & labels.str.lower().ne("nan")
+    fallback = adata.var[stable_id_col].astype(str)
+    active_names = labels.where(valid, fallback).astype(str)
+
+    adata.var_names = pd.Index(active_names, name=label_col)
+    adata.var_names_make_unique(join="-")
+    adata.uns["active_gene_names"] = {
+        "label_col": label_col,
+        "stable_id_col": stable_id_col,
+    }
+
+    if not inplace:
+        return target
+    return None
+
+
+# ---------------------------------------------------------------------------
 # merge_drugseq_objects
 # ---------------------------------------------------------------------------
 
@@ -336,6 +438,10 @@ def merge_drugseq_objects(
         label=batch_key,
         keys=[str(i) for i in range(len(adatas))],
     )
+    # Preserve shared gene annotations (e.g. STARsolo gene symbols) that are
+    # required by downstream QC metrics and marker visualizations.
+    if all(a.var_names.equals(adatas[0].var_names) for a in adatas):
+        merged.var = adatas[0].var.copy()
     merged.uns = adatas[0].uns.copy()
     merged.uns["de_results"] = {}
     merged.uns["plate_qc"] = {}

@@ -81,6 +81,53 @@ class TestComputeQCMetrics:
         assert round(dsd.obs.loc["S0","pct_mito"]) == 100
         assert round(dsd.obs.loc["S1","pct_mito"]) == 0
 
+    def test_default_prefixes_are_case_aware_for_mito_and_ribo(self):
+        genes = ["MT-A", "mt-b", "RPL1", "rps2", "Gene1"]
+        counts = pd.DataFrame(
+            [[10, 0], [20, 0], [30, 0], [40, 0], [0, 100]],
+            index=genes,
+            columns=["S0", "S1"],
+        )
+        obs = pd.DataFrame({
+            "plate_id": "P01", "well_id": ["A1", "A2"],
+            "compound": "DMSO", "dose": 0, "dose_unit": "uM",
+            "sample_type": "DMSO",
+        }, index=["S0", "S1"])
+        dsd = create_drugseq_object(counts, obs)
+
+        compute_qc_metrics(dsd, inplace=True)
+
+        assert dsd.var["is_mito"].tolist() == [True, True, False, False, False]
+        assert dsd.var["is_ribo"].tolist() == [False, False, True, True, False]
+        assert dsd.uns["qc_gene_definitions"]["mitochondrial"]["mode"] == "prefixes"
+        assert dsd.uns["qc_gene_definitions"]["ribosomal"]["mode"] == "prefixes"
+
+    def test_explicit_mito_and_ribo_gene_lists_override_prefixes(self):
+        genes = ["MT-A", "RPL1", "CUSTOM_MT", "CUSTOM_RIBO", "Gene1"]
+        counts = pd.DataFrame(
+            np.arange(1, 11).reshape(5, 2),
+            index=genes,
+            columns=["S0", "S1"],
+        )
+        obs = pd.DataFrame({
+            "plate_id": "P01", "well_id": ["A1", "A2"],
+            "compound": "DMSO", "dose": 0, "dose_unit": "uM",
+            "sample_type": "DMSO",
+        }, index=["S0", "S1"])
+        dsd = create_drugseq_object(counts, obs)
+
+        compute_qc_metrics(
+            dsd,
+            mito_genes=["CUSTOM_MT"],
+            ribo_genes=["CUSTOM_RIBO"],
+            inplace=True,
+        )
+
+        assert dsd.var["is_mito"].tolist() == [False, False, True, False, False]
+        assert dsd.var["is_ribo"].tolist() == [False, False, False, True, False]
+        assert dsd.uns["qc_gene_definitions"]["mitochondrial"]["mode"] == "genes"
+        assert dsd.uns["qc_gene_definitions"]["ribosomal"]["mode"] == "genes"
+
     def test_gini_near_zero_for_uniform_counts(self):
         """Uniform counts across genes → Gini ≈ 0."""
         rng = np.random.default_rng(7)
@@ -100,6 +147,13 @@ class TestComputeQCMetrics:
         dsd = _make_simple_object()
         compute_qc_metrics(dsd, inplace=True)
         assert (dsd.obs["outlier_score"] >= 0).all()
+
+    def test_mad_outlier_score_matches_documented_formula(self):
+        from drugseqpy.qc import _mad_outlier_score
+
+        values = np.array([[0.0, 0.0], [1.0, 2.0], [2.0, 4.0]])
+        scores = _mad_outlier_score(values)
+        np.testing.assert_allclose(scores, [np.sqrt(2), 0.0, np.sqrt(2)])
 
     def test_inplace_false_returns_dsd(self):
         dsd = _make_simple_object()

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -62,11 +62,16 @@ def _gini(x: np.ndarray) -> float:
 
 def compute_qc_metrics(
     dsd: DrugSeqData,
-    mito_pattern: str = "^MT-",
-    ribo_pattern: str = r"^RP[SL]",
+    mito_pattern: str | None = None,
+    ribo_pattern: str | None = None,
     hk_genes: list[str] | None = None,
     min_hk_detected: int = 5,
     inplace: bool = True,
+    *,
+    mito_prefixes: str | Sequence[str] | None = ("MT-", "mt-"),
+    ribo_prefixes: str | Sequence[str] | None = ("RPL", "RPS", "rpl", "rps"),
+    mito_genes: Sequence[str] | None = None,
+    ribo_genes: Sequence[str] | None = None,
 ) -> DrugSeqData | None:
     """
     Compute per-sample QC metrics and add them to ``adata.obs``.
@@ -80,11 +85,22 @@ def compute_qc_metrics(
     Parameters
     ----------
     dsd : DrugSeqData
-    mito_pattern : regex for mitochondrial genes (default ``^MT-``)
-    ribo_pattern : regex for ribosomal genes
+    mito_pattern : optional regex for mitochondrial genes. It takes priority
+        over ``mito_prefixes`` when no explicit ``mito_genes`` are supplied.
+    ribo_pattern : optional regex for ribosomal genes. It takes priority over
+        ``ribo_prefixes`` when no explicit ``ribo_genes`` are supplied.
     hk_genes : housekeeping gene list (None = built-in list)
     min_hk_detected : minimum HK genes required to compute HK metrics
     inplace : modify *dsd* in place (default True)
+    mito_prefixes : mitochondrial gene-symbol/ID prefixes. The default
+        recognizes both ``MT-`` and ``mt-``.
+    ribo_prefixes : ribosomal gene-symbol/ID prefixes. The default recognizes
+        uppercase and lowercase ``RPL``/``RPS``.
+    mito_genes : optional exact mitochondrial gene symbols or feature IDs.
+        When supplied, this list overrides ``mito_pattern`` and
+        ``mito_prefixes``.
+    ribo_genes : optional exact ribosomal gene symbols or feature IDs. When
+        supplied, this list overrides ``ribo_pattern`` and ``ribo_prefixes``.
     """
     if not inplace:
         dsd = DrugSeqData(dsd.adata.copy())
@@ -97,13 +113,26 @@ def compute_qc_metrics(
         mat = sp.csr_matrix(adata.X)
 
     gene_names = np.array(adata.var_names)
+    annotation_names = np.array(adata.var["gene_symbol"].astype(str)) if "gene_symbol" in adata.var else gene_names
 
     # -- library metrics ---------------------------------------------------
     total_umi = np.asarray(mat.sum(axis=1)).ravel().astype(float)
     n_genes = np.asarray((mat > 0).sum(axis=1)).ravel().astype(float)
 
-    is_mito = pd.Series(gene_names).str.contains(mito_pattern, regex=True).values
-    is_ribo = pd.Series(gene_names).str.contains(ribo_pattern, regex=True).values
+    is_mito, mito_definition = _resolve_feature_set(
+        gene_names,
+        annotation_names,
+        genes=mito_genes,
+        pattern=mito_pattern,
+        prefixes=mito_prefixes,
+    )
+    is_ribo, ribo_definition = _resolve_feature_set(
+        gene_names,
+        annotation_names,
+        genes=ribo_genes,
+        pattern=ribo_pattern,
+        prefixes=ribo_prefixes,
+    )
 
     print(f"  Found {is_mito.sum()} mitochondrial and {is_ribo.sum()} ribosomal genes.")
 
@@ -115,7 +144,9 @@ def compute_qc_metrics(
     # -- housekeeping gene stability ---------------------------------------
     if hk_genes is None:
         hk_genes = _load_hk_genes()
-    hk_present = [g for g in hk_genes if g in adata.var_names]
+    annotation_series = pd.Series(annotation_names)
+    hk_mask = annotation_series.isin(hk_genes).values
+    hk_present = sorted(pd.unique(annotation_series[hk_mask]))
 
     hk_mean_log = np.full(adata.n_obs, np.nan)
     hk_cv = np.full(adata.n_obs, np.nan)
@@ -123,8 +154,7 @@ def compute_qc_metrics(
 
     if len(hk_present) >= min_hk_detected:
         print(f"  Computing HK metrics using {len(hk_present)} genes.")
-        hk_idx = [adata.var_names.get_loc(g) for g in hk_present]
-        hk_mat = mat[:, hk_idx].toarray().astype(float)  # (samples, hk_genes)
+        hk_mat = mat[:, hk_mask].toarray().astype(float)  # (samples, hk genes/features)
         hk_mean_log = np.log1p(hk_mat).mean(axis=1)
         means = hk_mat.mean(axis=1)
         stds  = hk_mat.std(axis=1)
@@ -166,13 +196,173 @@ def compute_qc_metrics(
     # mark mito/ribo in var
     adata.var["is_mito"] = is_mito
     adata.var["is_ribo"] = is_ribo
+    adata.uns["qc_gene_definitions"] = {
+        "mitochondrial": {**mito_definition, "n_features": int(is_mito.sum())},
+        "ribosomal": {**ribo_definition, "n_features": int(is_ribo.sum())},
+    }
 
     print(f"QC metrics computed for {adata.n_obs} samples.")
     return dsd if not inplace else None
 
 
+# ---------------------------------------------------------------------------
+# audit_control_outliers / plot_control_outlier_audit
+# ---------------------------------------------------------------------------
+
+def audit_control_outliers(
+    dsd: DrugSeqData,
+    control_label: str = "DMSO",
+    control_col: str = "compound",
+    score_col: str = "outlier_score",
+    threshold: float = 5.0,
+    columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Return a documented control-well outlier audit table.
+
+    This function reports control wells only; it does not remove samples.
+    ``compute_qc_metrics()`` must be run before auditing its default score.
+    """
+    if control_col not in dsd.obs.columns:
+        raise KeyError(f"control_col '{control_col}' not found in obs.")
+    if score_col not in dsd.obs.columns:
+        raise KeyError(
+            f"score_col '{score_col}' not found in obs. "
+            "Run compute_qc_metrics() first."
+        )
+
+    default_columns = [
+        "sample_id", "plate_id", "well_id", "total_umi", "n_genes_det",
+        "pct_mito", "pct_ribo", score_col,
+    ]
+    selected = list(columns) if columns is not None else default_columns
+    selected = list(dict.fromkeys(column for column in selected
+                                  if column in dsd.obs.columns))
+    if score_col not in selected:
+        selected.append(score_col)
+
+    mask = dsd.obs[control_col].astype(str).str.casefold().eq(
+        str(control_label).casefold()
+    )
+    audit = dsd.obs.loc[mask, selected].copy()
+    if "sample_id" not in audit.columns:
+        audit.insert(0, "sample_id", audit.index.astype(str))
+    audit["excluded"] = pd.to_numeric(
+        audit[score_col], errors="coerce"
+    ).gt(float(threshold))
+    audit["exclusion_rule"] = (
+        f"{control_col} == {control_label} and {score_col} > {threshold:g}"
+    )
+    return audit.sort_values(
+        ["excluded", score_col], ascending=[False, False]
+    ).reset_index(drop=True)
+
+
+def plot_control_outlier_audit(
+    audit: pd.DataFrame,
+    x: str = "total_umi",
+    y: str = "n_genes_det",
+    label_col: str = "well_id",
+    plate_col: str = "plate_id",
+    figsize: tuple[float, float] = (8.3, 5.8),
+):
+    """Plot one control-audit table returned by ``audit_control_outliers``."""
+    import matplotlib.pyplot as plt
+
+    required = {x, y, "excluded"}
+    missing = required - set(audit.columns)
+    if missing:
+        raise KeyError(f"audit table is missing columns: {sorted(missing)}")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for excluded, color, label in (
+        (False, "#147d75", "Retained control"),
+        (True, "#c94f40", "Excluded control"),
+    ):
+        panel = audit[audit["excluded"].astype(bool).eq(excluded)]
+        ax.scatter(
+            panel[x], panel[y],
+            s=75 if excluded else 54,
+            color=color,
+            edgecolor="white",
+            linewidth=0.8,
+            alpha=0.9,
+            label=label,
+            zorder=3,
+        )
+    if label_col in audit.columns:
+        for row in audit[audit["excluded"].astype(bool)].itertuples(index=False):
+            label = str(getattr(row, label_col))
+            if plate_col in audit.columns:
+                label = f"{getattr(row, plate_col)} {label}"
+            ax.annotate(
+                label,
+                (getattr(row, x), getattr(row, y)),
+                xytext=(7, 7),
+                textcoords="offset points",
+                fontsize=8,
+                color="#7e3028",
+            )
+    ax.set(
+        title="Control audit before differential expression",
+        xlabel=x.replace("_", " ").title(),
+        ylabel=y.replace("_", " ").title(),
+    )
+    ax.grid(color="#dce5e5", linestyle="--", linewidth=0.7, zorder=0)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def _resolve_feature_set(
+    gene_names: np.ndarray,
+    annotation_names: np.ndarray,
+    *,
+    genes: Sequence[str] | None,
+    pattern: str | None,
+    prefixes: str | Sequence[str] | None,
+) -> tuple[np.ndarray, dict]:
+    """Resolve a feature set from exact genes, a regex, or prefixes."""
+    feature_ids = pd.Series(gene_names, dtype="string")
+    symbols = pd.Series(annotation_names, dtype="string")
+    if genes is not None:
+        selected = [str(gene) for gene in genes]
+        targets = set(selected)
+        mask = feature_ids.isin(targets) | symbols.isin(targets)
+        definition = {"mode": "genes", "genes": selected}
+    elif pattern is not None:
+        mask = (
+            feature_ids.str.contains(pattern, regex=True, na=False)
+            | symbols.str.contains(pattern, regex=True, na=False)
+        )
+        definition = {"mode": "pattern", "pattern": pattern}
+    else:
+        if prefixes is None:
+            selected_prefixes: tuple[str, ...] = ()
+        elif isinstance(prefixes, str):
+            selected_prefixes = (prefixes,)
+        else:
+            selected_prefixes = tuple(str(prefix) for prefix in prefixes)
+        mask = (
+            feature_ids.str.startswith(selected_prefixes, na=False)
+            | symbols.str.startswith(selected_prefixes, na=False)
+            if selected_prefixes else pd.Series(False, index=feature_ids.index)
+        )
+        definition = {"mode": "prefixes", "prefixes": list(selected_prefixes)}
+    return mask.to_numpy(dtype=bool), definition
+
+
 def _mad_outlier_score(mat: np.ndarray) -> np.ndarray:
-    """MAD-scaled Euclidean distance from the per-column median."""
+    """Unscaled-MAD normalized Euclidean distance from column medians.
+
+    For sample ``i`` and retained QC metric ``j``::
+
+        median_j = median_i(x_ij)
+        MAD_j = median_i(|x_ij - median_j|)
+        score_i = sqrt(sum_j(((x_ij - median_j) / MAD_j) ** 2))
+
+    Entire metric columns containing any NaN are omitted. A zero MAD is
+    replaced by 1.0. No normal-consistency multiplier (1.4826) is applied.
+    """
     ok = ~np.any(np.isnan(mat), axis=0)
     m = mat[:, ok]
     center = np.median(m, axis=0)
@@ -539,8 +729,20 @@ def check_zero_inflation(
     pd.DataFrame  gene × (obs_zeros, exp_zeros, zero_ratio, pvalue, padj,
                            zero_inflated)
     """
-    from scipy.stats import binom_test
     from statsmodels.stats.multitest import multipletests
+
+    # ``binom_test`` was removed in SciPy 1.12 in favor of
+    # ``binomtest(...).pvalue``.  Keep compatibility with both APIs.
+    try:
+        from scipy.stats import binomtest
+
+        def _binom_pvalue(k, n, p):
+            return binomtest(k, n, p, alternative="greater").pvalue
+    except ImportError:  # pragma: no cover - exercised on older SciPy
+        from scipy.stats import binom_test
+
+        def _binom_pvalue(k, n, p):
+            return binom_test(k, n, p, alternative="greater")
 
     mat = dsd.adata.layers["counts"].toarray().astype(float)
     genes = np.array(dsd.var_names)
@@ -576,7 +778,7 @@ def check_zero_inflation(
     obs_zeros = (mat == 0).sum(axis=0)
 
     pvals = np.array([
-        binom_test(int(obs), n_samp, max(1e-10, ef), alternative="greater")
+        _binom_pvalue(int(obs), n_samp, max(1e-10, ef))
         for obs, ef in zip(obs_zeros, exp_zero_frac)
     ])
     _, padj, _, _ = multipletests(pvals, method="fdr_bh")

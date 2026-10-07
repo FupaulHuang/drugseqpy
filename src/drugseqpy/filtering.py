@@ -160,6 +160,11 @@ def filter_genes(
             g_mat = mat[idx]
             passes = (g_mat >= min_count).sum(axis=0) >= min(min_samples, idx.sum())
             keep_expr |= passes
+        # Group-aware filtering is intended to be at least as permissive as
+        # the global rule: a gene expressed across several groups should not
+        # be discarded merely because it falls just below the per-group
+        # replicate threshold in every single group.
+        keep_expr |= (mat >= min_count).sum(axis=0) >= min_samples
     else:
         keep_expr = (mat >= min_count).sum(axis=0) >= min_samples
 

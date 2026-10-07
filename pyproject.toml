@@ -14,7 +14,6 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "DRUGseqPy authors" }]
-
 dependencies = [
     # Core data structures
     "anndata>=0.10",
@@ -36,9 +35,6 @@ dependencies = [
     "scikit-learn>=1.4",
     "umap-learn>=0.5",
 
-    # Batch correction
-    "harmonypy>=0.0.9",
-
     # Enrichment
     "gseapy>=1.1",
 
@@ -55,9 +51,14 @@ dependencies = [
     "leidenalg>=0.11.0",
 ]
 
+[project.scripts]
+drugseqpy = "drugseqpy.cli:main"
+
 [project.optional-dependencies]
+edgeR = [
+    "rpy2>=3.5",             # R bridge for method='edgeR'
+]
 full = [
-    "inmoose>=0.2",          # pycombat batch correction
     "decoupler>=1.6",        # pathway activity inference
     "chembl-webresource-client>=0.10",
     "rdkit>=2023.9",

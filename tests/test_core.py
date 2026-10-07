@@ -5,7 +5,12 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from drugseqpy import create_drugseq_object, merge_drugseq_objects, DrugSeqData
+from drugseqpy import (
+    DrugSeqData,
+    activate_gene_names,
+    create_drugseq_object,
+    merge_drugseq_objects,
+)
 from drugseqpy.utils import make_dummy_screen
 
 
@@ -64,6 +69,47 @@ def test_mismatched_ids_warns():
     obs_bad.index = ["X" + i for i in obs_bad.index]  # mismatch
     with pytest.raises(ValueError, match="Only"):
         create_drugseq_object(counts, obs_bad, min_overlap=0.9)
+
+
+def test_activate_gene_names_preserves_ids_and_handles_duplicate_missing_labels():
+    counts, obs = make_dummy_screen(n_genes=6, n_compounds=2, seed=8)
+    dsd = create_drugseq_object(counts, obs)
+    original_names = dsd.var_names.astype(str).tolist()
+    original_counts = dsd.layers["counts"].copy()
+    dsd.var["gene_symbol"] = ["TP53", "TP53", None, "", "EGFR", "MKI67"]
+
+    result = activate_gene_names(dsd)
+
+    assert result is None
+    assert dsd.var["ensembl_id"].tolist() == original_names
+    assert dsd.var_names.tolist() == [
+        "TP53", "TP53-1", original_names[2], original_names[3], "EGFR", "MKI67",
+    ]
+    assert dsd.uns["active_gene_names"] == {
+        "label_col": "gene_symbol",
+        "stable_id_col": "ensembl_id",
+    }
+    assert (dsd.layers["counts"] != original_counts).nnz == 0
+
+    activate_gene_names(dsd, label_col="ensembl_id")
+    assert dsd.var_names.tolist() == original_names
+
+
+def test_activate_gene_names_can_return_an_independent_copy():
+    counts, obs = make_dummy_screen(n_genes=4, n_compounds=2, seed=9)
+    dsd = create_drugseq_object(counts, obs)
+    original_names = dsd.var_names.astype(str).tolist()
+    dsd.var["external_label"] = ["A", "B", "C", "D"]
+
+    renamed = activate_gene_names(
+        dsd,
+        label_col="external_label",
+        inplace=False,
+    )
+
+    assert isinstance(renamed, DrugSeqData)
+    assert renamed.var_names.tolist() == ["A", "B", "C", "D"]
+    assert dsd.var_names.tolist() == original_names
 
 
 def test_merge_two_objects():

@@ -23,10 +23,12 @@ from .core import DrugSeqData
 # ---------------------------------------------------------------------------
 
 def _drugseq_palette(n: int) -> list[str]:
-    """Qualitative palette cycled to n colors."""
+    """Return a qualitative palette with one color per requested level."""
     base = ["#2980B9","#C0392B","#2ECC71","#E67E22","#9B59B6",
             "#1ABC9C","#E74C3C","#3498DB","#F39C12","#16A085"]
-    return [base[i % len(base)] for i in range(n)]
+    if n <= len(base):
+        return base[:n]
+    return [mcolors.to_hex(color) for color in sns.color_palette("tab20", n)]
 
 
 FLAG_COLORS = {"pass": "#2ECC71", "warn": "#F39C12", "fail": "#E74C3C"}
@@ -278,13 +280,14 @@ def plot_embedding(
     reduction: str = "X_umap",
     dims: tuple[int, int] = (0, 1),
     color_by: str = "compound",
+    split_by: str | None = None,
     label_by: str | None = None,
     point_size: float = 20,
     alpha: float = 0.8,
-    figsize: tuple = (7, 6),
+    figsize: tuple | None = None,
     show_pct_var: bool = True,
 ) -> plt.Figure:
-    """Scatter plot of any obsm embedding."""
+    """Scatter plot of any obsm embedding, optionally faceted by metadata."""
     if reduction not in dsd.adata.obsm:
         available = list(dsd.adata.obsm.keys())
         raise KeyError(f"'{reduction}' not in obsm. Available: {available}")
@@ -293,28 +296,10 @@ def plot_embedding(
     x     = emb[:, dims[0]]
     y     = emb[:, dims[1]]
     meta  = dsd.obs
-
-    fig, ax = plt.subplots(figsize=figsize)
-
-    if color_by in meta.columns:
-        groups = meta[color_by].values
-        unique = pd.unique(groups)
-        pal    = dict(zip(unique, _drugseq_palette(len(unique))))
-        for grp in unique:
-            mask = groups == grp
-            ax.scatter(x[mask], y[mask], s=point_size, alpha=alpha,
-                       label=str(grp), color=pal[grp], edgecolors="none")
-        ax.legend(fontsize=7, markerscale=1.5,
-                  bbox_to_anchor=(1.02, 1), loc="upper left")
-    elif color_by in dsd.obs.columns:
-        vals = dsd.obs[color_by].values.astype(float)
-        sc   = ax.scatter(x, y, c=vals, s=point_size, alpha=alpha,
-                          cmap="viridis", edgecolors="none")
-        plt.colorbar(sc, ax=ax, label=color_by, shrink=0.7)
-
-    if label_by and label_by in meta.columns:
-        for xi, yi, lab in zip(x, y, meta[label_by]):
-            ax.annotate(lab, (xi, yi), fontsize=5, alpha=0.6)
+    if color_by not in meta.columns:
+        raise KeyError(f"'{color_by}' not found in obs.")
+    if split_by is not None and split_by not in meta.columns:
+        raise KeyError(f"'{split_by}' not found in obs.")
 
     # axis labels with variance explained for PCA
     xlabel = f"Dim {dims[0]+1}"
@@ -325,11 +310,139 @@ def plot_embedding(
             xlabel = f"PC{dims[0]+1} ({pct[dims[0]]*100:.1f}%)"
             ylabel = f"PC{dims[1]+1} ({pct[dims[1]]*100:.1f}%)"
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"{reduction.replace('X_','').upper()} — {color_by}")
-    fig.tight_layout()
+    return _plot_coordinate_panels(
+        x,
+        y,
+        meta,
+        color_by=color_by,
+        split_by=split_by,
+        label_by=label_by,
+        point_size=point_size,
+        alpha=alpha,
+        figsize=figsize,
+        xlabel=xlabel,
+        ylabel=ylabel,
+        title=reduction.replace("X_", "").upper(),
+    )
+
+
+def _plot_coordinate_panels(
+    x: np.ndarray,
+    y: np.ndarray,
+    meta: pd.DataFrame,
+    *,
+    color_by: str,
+    split_by: str | None,
+    label_by: str | None,
+    point_size: float,
+    alpha: float,
+    figsize: tuple | None,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> plt.Figure:
+    """Render coordinates with a shared palette across optional facets."""
+    groups = meta[color_by].astype(str).to_numpy()
+    group_levels = list(pd.unique(groups))
+    palette = dict(zip(group_levels, _drugseq_palette(len(group_levels))))
+
+    if split_by is None:
+        split_levels = [None]
+    else:
+        split_levels = list(pd.unique(meta[split_by].astype(str)))
+        if not split_levels:
+            raise ValueError(f"'{split_by}' has no values to plot.")
+
+    n_panels = len(split_levels)
+    ncols = min(n_panels, 3)
+    nrows = int(np.ceil(n_panels / ncols))
+    if figsize is None:
+        figsize = (7, 6) if split_by is None else (6 * ncols, 5 * nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    flat_axes = axes.ravel()
+
+    for panel_index, level in enumerate(split_levels):
+        ax = flat_axes[panel_index]
+        panel_mask = np.ones(len(meta), dtype=bool)
+        if split_by is not None:
+            panel_mask = meta[split_by].astype(str).eq(level).to_numpy()
+
+        for group in group_levels:
+            mask = panel_mask & (groups == group)
+            if not mask.any():
+                continue
+            ax.scatter(
+                x[mask], y[mask], s=point_size, alpha=alpha,
+                label=group, color=palette[group], edgecolors="none",
+            )
+
+        if label_by and label_by in meta.columns:
+            labels = meta[label_by].astype(str).to_numpy()
+            for xi, yi, label in zip(x[panel_mask], y[panel_mask], labels[panel_mask]):
+                ax.annotate(label, (xi, yi), fontsize=5, alpha=0.6)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(
+            f"{split_by} = {level}" if split_by is not None else f"{title} — {color_by}"
+        )
+
+    for ax in flat_axes[n_panels:]:
+        ax.set_visible(False)
+
+    handles = [
+        plt.Line2D(
+            [], [], linestyle="", marker="o", markersize=5,
+            color=palette[group], label=group,
+        )
+        for group in group_levels
+    ]
+    if split_by is None:
+        flat_axes[0].legend(
+            handles=handles, fontsize=7, markerscale=1.2,
+            bbox_to_anchor=(1.02, 1), loc="upper left", title=color_by,
+        )
+    else:
+        fig.suptitle(f"{title} — colored by {color_by}, split by {split_by}")
+        fig.legend(
+            handles=handles, fontsize=7, ncol=1,
+            bbox_to_anchor=(1.01, 0.5), loc="center left", title=color_by,
+        )
+    fig.tight_layout(rect=(0, 0, 0.86 if split_by is not None else 1, 0.95))
     return fig
+
+
+def plot_pca(
+    dsd: DrugSeqData,
+    color_by: str = "compound",
+    **kwargs,
+) -> plt.Figure:
+    """Plot the PCA coordinates created by :func:`run_pca`."""
+    return plot_embedding(
+        dsd, reduction="X_pca", color_by=color_by, show_pct_var=True, **kwargs
+    )
+
+
+def plot_umap(
+    dsd: DrugSeqData,
+    color_by: str = "compound",
+    **kwargs,
+) -> plt.Figure:
+    """Plot the UMAP coordinates created by :func:`run_umap`."""
+    return plot_embedding(
+        dsd, reduction="X_umap", color_by=color_by, show_pct_var=False, **kwargs
+    )
+
+
+def plot_tsne(
+    dsd: DrugSeqData,
+    color_by: str = "compound",
+    **kwargs,
+) -> plt.Figure:
+    """Plot the t-SNE coordinates created by :func:`run_tsne`."""
+    return plot_embedding(
+        dsd, reduction="X_tsne", color_by=color_by, show_pct_var=False, **kwargs
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -339,10 +452,11 @@ def plot_embedding(
 def plot_mds(
     dsd: DrugSeqData,
     group_by: str = "sample_type",
+    split_by: str | None = None,
     label_by: str | None = "compound",
     n_top_genes: int = 500,
     use_norm: bool = True,
-    figsize: tuple = (7, 6),
+    figsize: tuple | None = None,
 ) -> plt.Figure:
     """
     MDS plot using limma-style leading log-fold-change distances.
@@ -352,10 +466,12 @@ def plot_mds(
     """
     from sklearn.manifold import MDS
 
-    X = dsd.adata.X if use_norm else dsd.adata.layers["counts"].toarray()
+    X = dsd.adata.X if use_norm else dsd.adata.layers["counts"]
     if sp.issparse(X):
         X = X.toarray()
-    X = np.log2(X.astype(float) + 1)
+    X = X.astype(float)
+    if not use_norm:
+        X = np.log2(X + 1)
 
     # gene selection: top genes by variance
     gene_var = X.var(axis=0)
@@ -376,28 +492,25 @@ def plot_mds(
                random_state=42, normalized_stress="auto")
     coords = mds.fit_transform(dist_mat)
 
-    fig, ax = plt.subplots(figsize=figsize)
     obs = dsd.obs
-    if group_by in obs.columns:
-        groups = obs[group_by].values
-        unique = pd.unique(groups)
-        pal    = dict(zip(unique, _drugseq_palette(len(unique))))
-        for grp in unique:
-            mask = groups == grp
-            ax.scatter(coords[mask, 0], coords[mask, 1],
-                       s=30, alpha=0.8, label=str(grp),
-                       color=pal[grp], edgecolors="none")
-        ax.legend(fontsize=7, bbox_to_anchor=(1.02, 1), loc="upper left")
-
-    if label_by and label_by in obs.columns:
-        for xi, yi, lab in zip(coords[:, 0], coords[:, 1], obs[label_by]):
-            ax.annotate(lab, (xi, yi), fontsize=5, alpha=0.6)
-
-    ax.set_xlabel(f"Leading logFC dim 1 (top {n_top_genes} genes)")
-    ax.set_ylabel("Leading logFC dim 2")
-    ax.set_title("MDS — sample grouping")
-    fig.tight_layout()
-    return fig
+    if group_by not in obs.columns:
+        raise KeyError(f"'{group_by}' not found in obs.")
+    if split_by is not None and split_by not in obs.columns:
+        raise KeyError(f"'{split_by}' not found in obs.")
+    return _plot_coordinate_panels(
+        coords[:, 0],
+        coords[:, 1],
+        obs,
+        color_by=group_by,
+        split_by=split_by,
+        label_by=label_by,
+        point_size=30,
+        alpha=0.8,
+        figsize=figsize,
+        xlabel=f"Leading logFC dim 1 (top {n_top_genes} genes)",
+        ylabel="Leading logFC dim 2",
+        title="MDS",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +631,7 @@ def plot_volcano(
 
     ax.axvline(-lfc_threshold, color="grey", linestyle="--", linewidth=0.6)
     ax.axvline( lfc_threshold, color="grey", linestyle="--", linewidth=0.6)
-    ax.axhline(-np.log10(fdr_threshold), color="grey",
+    ax.axhline(-np.log10(max(float(fdr_threshold), 1e-300)), color="grey",
                linestyle="--", linewidth=0.6)
 
     # label top genes
@@ -534,8 +647,10 @@ def plot_volcano(
     ax.set_ylabel("-log₁₀(adjusted p-value)")
     ax.set_title(f"Volcano: {compound} vs DMSO")
     ax.legend(fontsize=7)
-    ax.text(0.02, 0.98, f"↑{n_up}  ↓{n_down}", transform=ax.transAxes,
-            va="top", fontsize=8)
+    ax.text(
+        0.98, 0.02, f"↑{n_up}  ↓{n_down}", transform=ax.transAxes,
+        ha="right", va="bottom", fontsize=8,
+    )
     fig.tight_layout()
     return fig
 
@@ -758,5 +873,671 @@ def plot_compound_umap(
     ax.set_title("Compound-level UMAP (DE signatures)")
     ax.legend(title=color_by, fontsize=7, markerscale=1.5,
               bbox_to_anchor=(1.02, 1), loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Comparison-aware DEG plots
+# ---------------------------------------------------------------------------
+
+UP_COLOR = "#C0392B"
+DOWN_COLOR = "#2980B9"
+NS_COLOR = "#AAAAAA"
+
+
+def _coerce_dsd(dsd) -> DrugSeqData:
+    """Accept either the package wrapper or a plain AnnData object."""
+    return dsd if isinstance(dsd, DrugSeqData) else DrugSeqData(dsd)
+
+
+def _comparison_tables(dsd: DrugSeqData) -> dict:
+    """Comparison tables, preferring comparison_results over de_results."""
+    tables = dsd.adata.uns.get("comparison_results") or \
+        dsd.adata.uns.get("de_results", {})
+    if not tables:
+        raise ValueError(
+            "No comparison results found. Run compute_multi_de() first."
+        )
+    return tables
+
+
+def _significant_mask(df: pd.DataFrame, fdr_threshold: float,
+                      lfc_threshold: float) -> pd.Series:
+    """Use backend significance flags when available, otherwise thresholds."""
+    if "significant" in df.columns:
+        return df["significant"].fillna(False).astype(bool)
+    if {"padj", "logFC"}.issubset(df.columns):
+        return (df["padj"].notna() & (df["padj"] < fdr_threshold) &
+                (df["logFC"].abs() >= lfc_threshold))
+    return pd.Series(False, index=df.index, dtype=bool)
+
+
+def _pick_comparison_key(tables: dict, contrast: str | None,
+                         method: str | None) -> str:
+    """Select a result key from the comparison tables."""
+    keys = list(tables.keys())
+    canonical_method = method
+    if method is not None:
+        try:
+            from .differential import _resolve_method
+            canonical_method = _resolve_method(method)
+        except (TypeError, ValueError):
+            canonical_method = str(method)
+    if contrast is None:
+        if canonical_method is not None:
+            matching = [key for key in keys
+                        if "method" in tables[key].columns and
+                        not tables[key].empty and
+                        str(tables[key]["method"].iloc[0]) == str(canonical_method)]
+            if matching:
+                return matching[0]
+        simple = [k for k in keys if "::" not in str(k)]
+        return simple[0] if simple else keys[0]
+    if canonical_method is not None:
+        qualified = f"{contrast}::{canonical_method}"
+        if qualified in tables:
+            return qualified
+        matching = [key for key in keys
+                    if str(key).startswith(f"{contrast}::") and
+                    "method" in tables[key].columns and
+                    not tables[key].empty and
+                    str(tables[key]["method"].iloc[0]) == str(canonical_method)]
+        if matching:
+            return matching[0]
+    if contrast in tables:
+        return contrast
+    prefix = [k for k in keys if str(k).startswith(f"{contrast}::")]
+    if prefix:
+        return prefix[0]
+    raise KeyError(
+        f"Contrast '{contrast}' not in comparison results. "
+        f"Available: {keys}"
+    )
+
+
+def plot_comparison_volcano(
+    dsd: DrugSeqData,
+    contrast: str | None = None,
+    method: str | None = None,
+    lfc_threshold: float = 0.5,
+    fdr_threshold: float = 0.05,
+    n_label: int = 15,
+    figsize: tuple = (6, 5),
+) -> plt.Figure:
+    """Volcano plot for a contrast stored in comparison_results."""
+    dsd = _coerce_dsd(dsd)
+    tables = _comparison_tables(dsd)
+    key = _pick_comparison_key(tables, contrast, method)
+    df = tables[key].copy()
+
+    df["-log10_padj"] = -np.log10(df["padj"].astype(float).clip(1e-300))
+    sig_mask = _significant_mask(df, fdr_threshold, lfc_threshold)
+    df["direction"] = "NS"
+    df.loc[sig_mask & (df["logFC"] > 0), "direction"] = "Up"
+    df.loc[sig_mask & (df["logFC"] < 0), "direction"] = "Down"
+
+    color_map = {"Up": UP_COLOR, "Down": DOWN_COLOR, "NS": NS_COLOR}
+    fig, ax = plt.subplots(figsize=figsize)
+    for direc in ("NS", "Up", "Down"):
+        sub = df[df["direction"] == direc]
+        ax.scatter(sub["logFC"], sub["-log10_padj"], s=8, alpha=0.6,
+                   color=color_map[direc], label=direc, edgecolors="none")
+
+    ax.axvline(-lfc_threshold, color="grey", linestyle="--", linewidth=0.6)
+    ax.axvline(lfc_threshold, color="grey", linestyle="--", linewidth=0.6)
+    ax.axhline(-np.log10(fdr_threshold), color="grey",
+               linestyle="--", linewidth=0.6)
+
+    if n_label > 0:
+        maximum = float(df["-log10_padj"].max())
+        ax.set_ylim(top=maximum + max(0.8, maximum * 0.08))
+        top = df[sig_mask].nsmallest(n_label, "padj")
+        for index, (_, row) in enumerate(top.iterrows()):
+            ax.annotate(
+                row["gene"], (row["logFC"], row["-log10_padj"]),
+                xytext=(0.02, 0.97 - 0.035 * index),
+                textcoords="axes fraction",
+                ha="left",
+                va="top",
+                fontsize=5,
+                alpha=0.8,
+                arrowprops={"arrowstyle": "-", "color": "#6e7b7f", "lw": 0.35},
+            )
+
+    n_up = (df["direction"] == "Up").sum()
+    n_down = (df["direction"] == "Down").sum()
+    case = df["case"].iloc[0] if "case" in df.columns else key
+    control = df["control"].iloc[0] if "control" in df.columns else "control"
+    meth = df["method"].iloc[0] if "method" in df.columns else ""
+    ax.set_xlabel("log₂ fold change")
+    ax.set_ylabel("-log₁₀(adjusted p-value)")
+    ax.set_title(f"Volcano: {case} vs {control} ({meth})")
+    ax.legend(fontsize=7)
+    ax.text(0.02, 0.98, f"↑{n_up}  ↓{n_down}", transform=ax.transAxes,
+            va="top", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def plot_comparison_heatmap(
+    dsd: DrugSeqData,
+    contrasts: list[str] | None = None,
+    n_top_genes: int = 60,
+    value_col: str = "logFC",
+    fdr_threshold: float = 0.05,
+    lfc_threshold: float = 0.5,
+    significant_only: bool = True,
+    cluster_rows: bool = True,
+    cluster_cols: bool = True,
+    cmap: str = "RdBu_r",
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """
+    Heatmap of DEG logFC across contrasts (reference-script style).
+
+    Genes are the union of the top *n_top_genes* by absolute logFC across
+    the selected contrasts (significant genes only by default).
+    """
+    dsd = _coerce_dsd(dsd)
+    tables = _comparison_tables(dsd)
+    keys = ([contrasts] if isinstance(contrasts, str) else contrasts) or list(tables.keys())
+    keys = [k for k in keys if k in tables]
+    if not keys:
+        raise ValueError("None of the requested contrasts have results.")
+
+    per_contrast = []
+    for key in keys:
+        df = tables[key]
+        if significant_only:
+            df = df[_significant_mask(df, fdr_threshold, lfc_threshold)]
+        top = df.reindex(df["logFC"].abs().sort_values(ascending=False).index)\
+                 .head(n_top_genes)
+        per_contrast.append(top[["gene", value_col]].rename(
+            columns={value_col: key}))
+
+    mat = pd.concat(
+        [t.set_index("gene") for t in per_contrast], axis=1
+    ).fillna(0.0)
+    if len(mat) > n_top_genes:
+        keep = mat.abs().max(axis=1).sort_values(ascending=False, kind="mergesort")\
+               .head(n_top_genes).index
+        mat = mat.loc[keep]
+    if mat.empty:
+        raise ValueError(
+            "No significant genes at the given thresholds — nothing to plot."
+        )
+
+    if figsize is None:
+        figsize = (max(6, len(mat.columns) * 0.8),
+                   max(5, len(mat) * 0.12))
+
+    # hierarchical clustering needs >= 2 rows / columns
+    cluster_rows = cluster_rows and mat.shape[0] >= 2
+    cluster_cols = cluster_cols and mat.shape[1] >= 2
+    if mat.shape[0] >= 2:
+        g = sns.clustermap(
+            mat, cmap=cmap, center=0,
+            row_cluster=cluster_rows, col_cluster=cluster_cols,
+            figsize=figsize, yticklabels=len(mat) <= 80,
+        )
+        g.ax_heatmap.set_title(f"DEG logFC heatmap (n={len(mat)} genes)")
+        return g.fig
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(mat, cmap=cmap, center=0, ax=ax,
+                yticklabels=True, cbar_kws={"label": value_col})
+    ax.set_title(f"DEG logFC heatmap (n={len(mat)} genes)")
+    fig.tight_layout()
+    return fig
+
+
+def plot_deg_counts(
+    dsd: DrugSeqData,
+    contrasts: list[str] | None = None,
+    fdr_threshold: float = 0.05,
+    lfc_threshold: float = 0.5,
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """Mirrored bar plot of significant up/down DEG counts per contrast."""
+    dsd = _coerce_dsd(dsd)
+    tables = _comparison_tables(dsd)
+    keys = ([contrasts] if isinstance(contrasts, str) else contrasts) or list(tables.keys())
+    keys = [k for k in keys if k in tables]
+    if not keys:
+        raise ValueError("None of the requested contrasts have results.")
+
+    rows = []
+    for key in keys:
+        df = tables[key]
+        sig = _significant_mask(df, fdr_threshold, lfc_threshold)
+        rows.append({
+            "contrast": str(key),
+            "up": int((sig & (df["logFC"] > 0)).sum()),
+            "down": int((sig & (df["logFC"] < 0)).sum()),
+        })
+    counts = pd.DataFrame(rows).set_index("contrast")
+
+    if figsize is None:
+        figsize = (6, max(3, len(counts) * 0.5))
+    fig, ax = plt.subplots(figsize=figsize)
+    y = np.arange(len(counts))
+    ax.barh(y, counts["up"], color=UP_COLOR, label="up", height=0.6)
+    ax.barh(y, -counts["down"], color=DOWN_COLOR, label="down", height=0.6)
+    for i, (u, d) in enumerate(zip(counts["up"], counts["down"])):
+        if u:
+            ax.text(u, i, f" {u}", va="center", fontsize=7)
+        if d:
+            ax.text(-d, i, f" {d} ", va="center", ha="right", fontsize=7)
+    ax.axvline(0, color="black", linewidth=0.6)
+    ax.set_yticks(y)
+    ax.set_yticklabels(counts.index, fontsize=7)
+    ax.set_xlabel("Number of significant DEGs")
+    ax.set_title("DEG counts per contrast")
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    return fig
+
+
+def _gene_expression_groups(dsd, contrast, group_col, show_groups):
+    """Resolve the sample groups shown for gene box/violin plots."""
+    obs = dsd.obs
+
+    def _selector_values(value):
+        if isinstance(value, (list, tuple, set, frozenset, pd.Index, np.ndarray)):
+            return [str(item) for item in value]
+        text = str(value)
+        return text.split("|") if "|" in text else [text]
+
+    if contrast is not None:
+        tables = _comparison_tables(dsd)
+        key = _pick_comparison_key(tables, contrast, None)
+        df = tables[key]
+        case, control = df["case"].iloc[0], df["control"].iloc[0]
+        groups = _selector_values(control) + _selector_values(case)
+        groups = list(dict.fromkeys(groups))
+        gcol = group_col
+        if gcol not in obs.columns:
+            raise KeyError(f"group column '{gcol}' not in obs.")
+        return gcol, groups
+    if show_groups is not None:
+        selected = ([show_groups] if isinstance(show_groups, str)
+                    else list(show_groups))
+        selected = [str(value) for value in selected]
+        return group_col, selected
+    if group_col not in obs.columns:
+        raise KeyError(f"group column '{group_col}' not in obs.")
+    levels = [lv for lv in obs[group_col].dropna().unique()
+              if str(lv) not in ("vehicle", "media", "Media")]
+    return group_col, levels[:8]
+
+
+def _resolve_gene_indices(dsd, genes):
+    """Resolve requested gene IDs or symbols to unique var column indices."""
+    names = [str(value) for value in dsd.var_names]
+    exact = {value: i for i, value in enumerate(names)}
+    lower = {value.lower(): i for i, value in enumerate(names)}
+    symbols = {}
+    if "gene_symbol" in dsd.var.columns:
+        for i, value in enumerate(dsd.var["gene_symbol"].astype(str)):
+            key = value.strip().lower()
+            if key and key not in {"nan", "none"}:
+                symbols.setdefault(key, i)
+    found = []
+    missing = []
+    for gene in genes:
+        text = str(gene)
+        idx = exact.get(text)
+        if idx is None:
+            idx = lower.get(text.lower(), symbols.get(text.lower()))
+        if idx is None:
+            missing.append(gene)
+        else:
+            found.append((text, idx))
+    return found, missing
+
+
+def _gene_expression_matrix(dsd, use_norm):
+    """Expression values (n_samples, n_genes) for box/violin plots."""
+    if use_norm:
+        X = dsd.adata.X
+        if X is None:
+            X = dsd.adata.layers.get("counts")
+    else:
+        if "counts" not in dsd.adata.layers:
+            raise KeyError("'counts' layer is required for expression plots.")
+        X = dsd.adata.layers["counts"]
+        lib = np.asarray(X.sum(axis=1)).reshape(-1, 1)
+        X = X / (lib + 1e-8) * 1e6
+    if sp.issparse(X):
+        X = X.toarray()
+    return np.asarray(X, dtype=float)
+
+
+def plot_gene_boxplot(
+    dsd: DrugSeqData,
+    genes: list[str],
+    group_col: str = "compound",
+    contrast: str | None = None,
+    show_groups: list[str] | None = None,
+    use_norm: bool = True,
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """Box plots of expression for one or more genes across groups."""
+    dsd = _coerce_dsd(dsd)
+    if isinstance(genes, str):
+        genes = [genes]
+    gcol, groups = _gene_expression_groups(dsd, contrast, group_col,
+                                           show_groups)
+    mask = dsd.obs[gcol].isin(groups)
+    sub = dsd.adata[mask]
+    vals = _gene_expression_matrix(DrugSeqData(sub), use_norm)
+
+    resolved_genes, _ = _resolve_gene_indices(dsd, genes)
+    if not resolved_genes:
+        raise ValueError(
+            f"None of the requested genes found in var_names: {genes}"
+        )
+
+    n_genes = len(resolved_genes)
+    ncols = min(3, n_genes)
+    nrows = int(np.ceil(n_genes / ncols))
+    if figsize is None:
+        figsize = (ncols * 4, nrows * 3.5)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+
+    palette = [NS_COLOR if g == groups[0] else DOWN_COLOR for g in groups]
+    for idx, (gene, gene_idx) in enumerate(resolved_genes):
+        ax = axes[idx // ncols][idx % ncols]
+        data = pd.DataFrame({
+            "expression": vals[:, gene_idx],
+            "group": pd.Categorical(sub.obs[gcol].values,
+                                    categories=groups, ordered=True),
+        })
+        sns.boxplot(data=data, x="group", y="expression",
+                    hue="group", palette=palette, legend=False,
+                    ax=ax, linewidth=0.8, fliersize=2)
+        ax.set_title(gene, fontsize=9)
+        ax.set_xlabel("")
+        ax.set_ylabel("expression" if use_norm else "CPM", fontsize=7)
+        ax.tick_params(axis="x", labelrotation=40, labelsize=7)
+
+    for idx in range(n_genes, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle("Gene expression boxplots", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def plot_gene_violin(
+    dsd: DrugSeqData,
+    genes: list[str],
+    group_col: str = "compound",
+    contrast: str | None = None,
+    show_groups: list[str] | None = None,
+    use_norm: bool = True,
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """Violin plots (inner box + strip overlay) of expression per group."""
+    dsd = _coerce_dsd(dsd)
+    if isinstance(genes, str):
+        genes = [genes]
+    gcol, groups = _gene_expression_groups(dsd, contrast, group_col,
+                                           show_groups)
+    mask = dsd.obs[gcol].isin(groups)
+    sub = dsd.adata[mask]
+    vals = _gene_expression_matrix(DrugSeqData(sub), use_norm)
+
+    resolved_genes, _ = _resolve_gene_indices(dsd, genes)
+    if not resolved_genes:
+        raise ValueError(
+            f"None of the requested genes found in var_names: {genes}"
+        )
+
+    n_genes = len(resolved_genes)
+    ncols = min(3, n_genes)
+    nrows = int(np.ceil(n_genes / ncols))
+    if figsize is None:
+        figsize = (ncols * 4, nrows * 3.5)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+
+    palette = [NS_COLOR if g == groups[0] else DOWN_COLOR for g in groups]
+    for idx, (gene, gene_idx) in enumerate(resolved_genes):
+        ax = axes[idx // ncols][idx % ncols]
+        data = pd.DataFrame({
+            "expression": vals[:, gene_idx],
+            "group": pd.Categorical(sub.obs[gcol].values,
+                                    categories=groups, ordered=True),
+        })
+        sns.violinplot(data=data, x="group", y="expression",
+                       hue="group", palette=palette, legend=False,
+                       ax=ax, inner="box", cut=0, linewidth=0.6, alpha=0.7)
+        sns.stripplot(data=data, x="group", y="expression",
+                      color="black", size=1.5, alpha=0.4, ax=ax, jitter=True)
+        ax.set_title(gene, fontsize=9)
+        ax.set_xlabel("")
+        ax.set_ylabel("expression" if use_norm else "CPM", fontsize=7)
+        ax.tick_params(axis="x", labelrotation=40, labelsize=7)
+
+    for idx in range(n_genes, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle("Gene expression violin plots", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Enrichment plots
+# ---------------------------------------------------------------------------
+
+def _enrichment_slot(dsd, contrast, library, mode, direction):
+    """Fetch one enrichment DataFrame from uns['enrichment_results']."""
+    enr = dsd.adata.uns.get("enrichment_results", {})
+    if not enr:
+        raise ValueError(
+            "No enrichment results found. Run run_enrichment() first."
+        )
+    if contrast is None:
+        contrast = list(enr.keys())[0]
+    if contrast not in enr:
+        raise KeyError(f"Contrast '{contrast}' not in enrichment_results.")
+    if library is None:
+        library = list(enr[contrast].keys())[0]
+    if library not in enr[contrast]:
+        raise KeyError(f"Library '{library}' not found for '{contrast}'.")
+    slot = f"{mode}_{direction}" if mode == "ora" else "gsea"
+    df = enr[contrast][library].get(slot)
+    if df is None:
+        df = pd.DataFrame()
+    return contrast, library, df
+
+
+def _top_terms(df, n_terms, mode):
+    """Top pathways by adjusted p-value (per mode's column names)."""
+    padj_col = "Adjusted P-value" if mode == "ora" else "FDR q-val"
+    if padj_col not in df.columns or df.empty:
+        return df
+    sub = df[df[padj_col].notna()].sort_values(padj_col)
+    return sub.head(n_terms)
+
+
+def _empty_axes_message(fig, ax, message):
+    ax.axis("off")
+    ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=10,
+            color="grey", transform=ax.transAxes)
+    return fig
+
+
+def plot_enrichment_dotplot(
+    dsd: DrugSeqData,
+    contrast: str | None = None,
+    libraries: list[str] | None = None,
+    direction: str = "up",
+    mode: str = "ora",
+    n_terms: int = 20,
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """
+    Dot plot of top enriched pathways.
+
+    For ORA mode, dot size = overlap count and color encodes direction
+    (``direction='both'`` plots up and down together).  For GSEA mode,
+    dot size = |NES| and color = NES sign.
+    """
+    dsd = _coerce_dsd(dsd)
+    if mode not in {"ora", "gsea"}:
+        raise ValueError("mode must be 'ora' or 'gsea'.")
+    if direction not in {"up", "down", "both"}:
+        raise ValueError("direction must be 'up', 'down', or 'both'.")
+    enr = dsd.adata.uns.get("enrichment_results", {})
+    if not enr:
+        fig, ax = plt.subplots(figsize=(6, 2))
+        return _empty_axes_message(fig, ax, "No enrichment results found.")
+
+    if contrast is None:
+        contrast = list(enr.keys())[0]
+    if contrast not in enr:
+        raise KeyError(f"Contrast '{contrast}' not in enrichment_results.")
+    libs = ([libraries] if isinstance(libraries, str) else list(libraries)) \
+        if libraries else list(enr[contrast].keys())
+
+    directions = ["up", "down"] if direction == "both" else [direction]
+    if figsize is None:
+        figsize = (4.5 * len(libs), 5)
+    fig, axes = plt.subplots(1, len(libs), figsize=figsize, squeeze=False)
+
+    for ax, lib in zip(axes[0], libs):
+        frames = {}
+        for direc in directions:
+            slot = f"{mode}_{direc}" if mode == "ora" else "gsea"
+            df = enr[contrast].get(lib, {}).get(slot, pd.DataFrame())
+            frames[direc] = _top_terms(df, n_terms, mode)
+        ax.set_title(lib, fontsize=9)
+
+        plot_rows = []
+        for direc, df in frames.items():
+            if df.empty:
+                continue
+            padj_col = "Adjusted P-value" if mode == "ora" else "FDR q-val"
+            for _, r in df.iterrows():
+                if mode == "ora":
+                    overlap = str(r.get("Overlap", ""))
+                    magnitude = int(overlap.split("/")[0]) \
+                        if overlap and overlap.split("/")[0].isdigit() else 10
+                    color = UP_COLOR if direc == "up" else DOWN_COLOR
+                    size = 24 + 18 * np.sqrt(magnitude)
+                    eff = magnitude
+                else:
+                    nes = float(r.get("NES", np.nan))
+                    magnitude = abs(nes)
+                    size = magnitude * 30 + 10
+                    color = UP_COLOR if nes > 0 else DOWN_COLOR
+                    eff = nes
+                plot_rows.append({
+                    "pathway": str(r.get("Term", "")),
+                    "x": -np.log10(max(float(r.get(padj_col, np.nan) or 1e-300), 1e-300)),
+                    "size": size,
+                    "color": color,
+                    "effect": eff,
+                })
+        if not plot_rows:
+            _empty_axes_message(fig, ax,
+                                "No significant enrichment" if frames
+                                else f"Library '{lib}' not available")
+            continue
+        pdf = pd.DataFrame(plot_rows)
+        pdf["y"] = range(len(pdf))
+        ax.scatter(pdf["x"], pdf["y"], s=pdf["size"], c=pdf["color"],
+                   alpha=0.8, edgecolors="none")
+        ax.set_yticks(pdf["y"])
+        labels = [p[:40] + ("…" if len(p) > 40 else "")
+                  for p in pdf["pathway"]]
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.set_xlabel("-log₁₀ adjusted p-value", fontsize=8)
+        ax.tick_params(axis="x", labelsize=7)
+        magnitudes = np.asarray([abs(value) for value in pdf["effect"]], dtype=float)
+        legend_values = np.unique(
+            np.quantile(magnitudes, [0, 0.5, 1]).round(1)
+        )
+        size_handles = []
+        for value in legend_values:
+            marker_size = (
+                24 + 18 * np.sqrt(value)
+                if mode == "ora" else value * 30 + 10
+            )
+            label = f"{int(value)}" if mode == "ora" else f"{value:g}"
+            size_handles.append(
+                ax.scatter([], [], s=marker_size, color="#738185", alpha=0.8,
+                           edgecolors="none", label=label)
+            )
+        size_legend = ax.legend(
+            handles=size_handles,
+            title="Overlap genes" if mode == "ora" else "|NES|",
+            fontsize=7,
+            title_fontsize=7,
+            loc="lower right" if direction == "both" else "upper right",
+            frameon=False,
+        )
+        if direction == "both":
+            from matplotlib.patches import Patch
+            ax.add_artist(size_legend)
+            ax.legend(handles=[Patch(color=UP_COLOR, label="up"),
+                               Patch(color=DOWN_COLOR, label="down")],
+                      fontsize=7, loc="upper right", frameon=False)
+    direction_label = {
+        "up": "upregulated DEGs",
+        "down": "downregulated DEGs",
+        "both": "up- and downregulated DEGs",
+    }[direction]
+    fig.suptitle(
+        f"Enrichment dot plot — {contrast}, {direction_label} ({mode})",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def plot_enrichment_barplot(
+    dsd: DrugSeqData,
+    contrast: str | None = None,
+    library: str | None = None,
+    direction: str = "up",
+    mode: str = "ora",
+    n_terms: int = 20,
+    figsize: tuple | None = None,
+) -> plt.Figure:
+    """Horizontal bar plot of top pathways by -log10 adjusted p-value."""
+    dsd = _coerce_dsd(dsd)
+    if mode not in {"ora", "gsea"}:
+        raise ValueError("mode must be 'ora' or 'gsea'.")
+    if direction not in {"up", "down"}:
+        raise ValueError("direction must be 'up' or 'down'.")
+    contrast, library, df = _enrichment_slot(dsd, contrast, library,
+                                             mode, direction)
+    df = _top_terms(df, n_terms, mode)
+
+    if figsize is None:
+        figsize = (6.5, max(3, len(df) * 0.35))
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if df.empty:
+        return _empty_axes_message(fig, ax, "No significant enrichment")
+
+    padj_col = "Adjusted P-value" if mode == "ora" else "FDR q-val"
+    df = df.copy()
+    df["-log10_padj"] = -np.log10(
+        df[padj_col].astype(float).clip(lower=1e-300))
+    df = df.sort_values("-log10_padj", ascending=False)
+    color = UP_COLOR if direction == "up" else DOWN_COLOR
+
+    ax.barh(range(len(df)), df["-log10_padj"], color=color, height=0.6)
+    ax.set_yticks(range(len(df)))
+    ax.set_yticklabels([t[:50] + ("…" if len(t) > 50 else "")
+                        for t in df["Term"]], fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel("-log₁₀ adjusted p-value")
+    ax.set_title(f"{contrast} — {library} ({mode} {direction})", fontsize=10)
     fig.tight_layout()
     return fig
