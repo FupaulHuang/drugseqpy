@@ -15,6 +15,8 @@ import seaborn as sns
 
 def _wrap_label(text: str, width: int) -> str:
     """Wrap a well label to ``width`` chars so it fits inside its marker."""
+    if "\n" in text:
+        return "\n".join(_wrap_label(line, width) for line in text.split("\n"))
     if width <= 0 or len(text) <= width:
         return text
     wrapped = textwrap.wrap(text, width=width)
@@ -191,6 +193,7 @@ def plot_plate_layout(
     continuous: bool = False,
     log_values: bool = True,
     show_legend: bool = True,
+    legend_per_plate: bool = False,
     nrow: int = 8,
     ncol: int = 12,
     nrow_plate: int | None = None,
@@ -217,6 +220,9 @@ def plot_plate_layout(
     plates. ``split_by`` optionally creates separate physical-layout panels
     for each plate-by-split combination, while ``nrow_plate`` controls how
     many panels appear in one figure row.
+    ``legend_per_plate=True`` gives each plate its own legend or colorbar and
+    scales continuous colors independently within each plate. The default
+    shares one scale and legend across the figure.
     """
     nrow, ncol = _validate_plate_shape(nrow, ncol)
     if (value_col is None) == (well_color is None):
@@ -333,6 +339,8 @@ def plot_plate_layout(
     vmin = float(np.nanmin(numeric_values)) if numeric_values is not None and numeric_values.notna().any() else None
     vmax = float(np.nanmax(numeric_values)) if numeric_values is not None and numeric_values.notna().any() else None
     scatter_for_colorbar = None
+    colorbar_entries = []
+    legend_entries = []
     used_axes = []
     full_col_ticks = list(range(1, ncol + 1))
     full_row_ticks = list(range(1, nrow + 1))
@@ -354,8 +362,11 @@ def plot_plate_layout(
         ax.add_patch(plate_body)
         sub = layout if plate == "plate" else layout[layout["plate_id"] == plate]
         sub = sub.dropna(subset=["row", "column"])
-        missing = sub[sub.get("is_missing_well", False).astype(bool)]
-        sub = sub[~sub.get("is_missing_well", False).astype(bool)]
+        missing_mask = sub["is_missing_well"].astype(bool)
+        if continuous:
+            missing_mask = missing_mask | sub["value"].isna()
+        missing = sub[missing_mask]
+        sub = sub[~missing_mask]
         if len(missing):
             ax.scatter(
                 missing["column"],
@@ -381,8 +392,17 @@ def plot_plate_layout(
             point_colors = point_colors.where(sub["value"].notna(), "#D1D5DB")
             sc = ax.scatter(sub["column"], sub["row"], c=point_colors, s=marker_size, edgecolor=edge_color, linewidth=edge_width, zorder=3)
         else:
+            if legend_per_plate:
+                values = sub["plot_value"].dropna()
+                vmin = float(values.min()) if len(values) else None
+                vmax = float(values.max()) if len(values) else None
             sc = ax.scatter(sub["column"], sub["row"], c=sub["plot_value"], cmap=cmap, s=marker_size, edgecolor=edge_color, linewidth=edge_width, vmin=vmin, vmax=vmax, zorder=3)
             scatter_for_colorbar = sc
+            colorbar_entries.append((ax, sc, plate))
+            layout.loc[layout["plate_id"].eq(plate), "color_vmin"] = vmin
+            layout.loc[layout["plate_id"].eq(plate), "color_vmax"] = vmax
+        if categorical:
+            legend_entries.append((ax, plate, list(pd.unique(sub["value"].dropna().astype(str)))))
         if label_col is not None:
             diameter_pt = marker_diameter_in * 72.0
             wrap_width = max(4, min(12, int(diameter_pt / 4.2)))
@@ -428,14 +448,27 @@ def plot_plate_layout(
     )
     right = .91 if has_colorbar else .98
     top = .92
-    fig.subplots_adjust(left=.055, right=right, bottom=bottom, top=top, wspace=.16, hspace=.25)
-    if has_colorbar:
+    fig.subplots_adjust(left=.055, right=right, bottom=bottom, top=top, wspace=.3 if legend_per_plate else .16, hspace=.42 if legend_per_plate else .25)
+    if has_colorbar and legend_per_plate:
+        for ax, scatter, plate in colorbar_entries:
+            cbar = fig.colorbar(scatter, ax=ax, fraction=.035, pad=.03, shrink=.85)
+            colorbar_label = f"log1p({value_col})" if log_values else str(value_col)
+            cbar.set_label(f"{plate}: {colorbar_label}", fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
+    elif has_colorbar:
         cax = fig.add_axes([right + .015, bottom + .07, .012, .78 - bottom])
         cbar = fig.colorbar(scatter_for_colorbar, cax=cax)
         colorbar_label = f"log1p({value_col})" if log_values else str(value_col)
         cbar.set_label(colorbar_label, fontsize=8)
         cbar.ax.tick_params(labelsize=7)
-    if has_bottom_legend:
+    if has_bottom_legend and legend_per_plate:
+        for ax, plate, local_categories in legend_entries:
+            handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=colors[k],
+                              label=k, markersize=6) for k in local_categories]
+            ax.legend(handles=handles, title=f"{plate}: {value_col}", loc="upper center",
+                      bbox_to_anchor=(.5, -.12), ncol=min(8, max(1, len(handles))),
+                      frameon=False, fontsize=7, title_fontsize=8)
+    elif has_bottom_legend:
         fontsize = 7 if len(colors) <= 12 else 5
         fig.legend([Line2D([0], [0], marker="o", color="w", markerfacecolor=c, label=k, markersize=6) for k, c in colors.items()], list(colors), title=value_col, loc="lower center", bbox_to_anchor=(.5, .015), ncol=legend_ncol, frameon=False, fontsize=fontsize, title_fontsize=8)
     return fig, layout

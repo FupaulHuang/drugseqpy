@@ -128,6 +128,23 @@ from .plots import (
 )
 from .io import load_metadata, load_expression_matrix, create_drugseq_from_files
 from .plate import build_plate_layout, plot_plate_layout
+from .combined import (
+    compute_combined_qc,
+    read_star_summary_metrics,
+    plot_combined_barnyard,
+    plot_combined_species_purity,
+    plot_combined_density,
+    plot_combined_gene_umi,
+    plot_combined_markers,
+    plot_combined_saturation,
+    plot_combined_qc_boxplots,
+    plot_mt_ribo_housekeeping,
+    plot_combined_read_doughnut,
+    generate_combined_qc_report,
+    MOUSE_3T3_MARKERS,
+    HUMAN_HOUSEKEEPING,
+    MOUSE_HOUSEKEEPING,
+)
 from .mix_species import assign_well_species, compute_mix_species_qc
 from .reproducibility import (
     compute_within_plate_repeatability,
@@ -172,6 +189,11 @@ from .workflows import (
 )
 
 __all__ = [
+    "compute_combined_qc", "read_star_summary_metrics", "generate_combined_qc_report",
+    "plot_combined_barnyard", "plot_combined_species_purity", "plot_combined_density",
+    "plot_combined_gene_umi", "plot_combined_markers", "plot_combined_saturation",
+    "plot_combined_qc_boxplots", "plot_mt_ribo_housekeeping", "plot_combined_read_doughnut",
+    "MOUSE_3T3_MARKERS", "HUMAN_HOUSEKEEPING", "MOUSE_HOUSEKEEPING",
     # core
     "DrugSeqData", "activate_gene_names", "create_drugseq_object",
     "merge_drugseq_objects",

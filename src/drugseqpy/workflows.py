@@ -782,6 +782,7 @@ def generate_plate_layout_figures(
     continuous: bool = False,
     log_values: bool = True,
     show_legend: bool = True,
+    legend_per_plate: bool = False,
     nrow: int = 8,
     ncol: int = 12,
     nrow_plate: int | None = None,
@@ -813,6 +814,8 @@ def generate_plate_layout_figures(
     define the exact plate format, such as 8 by 12 for 96-well plates or 16 by
     24 for 384-well plates. ``nrow_plate`` controls how many plate panels
     appear in one figure row.
+    ``legend_per_plate=True`` uses separate legends/colorbars and independent
+    continuous color ranges for each plate.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -899,6 +902,7 @@ def generate_plate_layout_figures(
         label_size=label_size,
         label_style=label_style,
         label_weight=label_weight,
+        legend_per_plate=legend_per_plate,
     )
     sort_cols = [c for c in ["plate_id", "row", "column"] if c in layout.columns]
     layout_sorted = layout.sort_values(sort_cols) if sort_cols else layout
