@@ -145,7 +145,7 @@ plate names identify the worked data and are not part of the API definition:
 - [Multi-plate comparison workflow](examples/multi_plate_comparison_workflow_tutorial.html)
   covers two or more plates and validates both batch removal and biological
   reproducibility.
-- [Quality-control workflow](examples/qc_workflow_tutorial.html) covers matrix
+- [Quality-control workflow](https://fupaulhuang.github.io/drugseqpy-tutorials/qc-workflow.html) covers matrix
   and metadata QC, plate layouts, optional STARsolo QC, related functions,
   saved source tables, and terminology.
 - [Mix-species workflow](examples/mix_species_workflow_tutorial.html)
