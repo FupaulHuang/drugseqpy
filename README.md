@@ -1,5 +1,12 @@
 # DRUGseqPy
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/branding/drugseqpy-logo-dark.svg">
+    <img src="docs/assets/branding/drugseqpy-logo.svg" alt="drugseqpy — four-well cell culture plate logo" width="480">
+  </picture>
+</p>
+
 Python reimplementation of the DRUGseqR package for quality control and analysis of Drug-seq / MAC-seq / HTTr high-throughput transcriptomics data. Built on [AnnData](https://anndata.readthedocs.io) and [scanpy](https://scanpy.readthedocs.io).
 
 ## Overview
