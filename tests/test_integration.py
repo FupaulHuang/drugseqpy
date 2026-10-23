@@ -14,7 +14,7 @@ from drugseqpy.utils import make_dummy_screen
 # ---------------------------------------------------------------------------
 
 def test_full_pipeline_end_to_end():
-    """Run the complete DRUGseqPy workflow and assert data consistency."""
+    """Run the complete drugseqpy workflow and assert data consistency."""
     counts, obs = make_dummy_screen(
         n_genes=200, n_plates=2,
         n_dmso_per_plate=8, n_compounds=4, n_reps=4, seed=2024

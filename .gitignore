@@ -16,3 +16,6 @@ dist/
 /examples/
 *.h5ad
 *.csv
+
+# Local Claude configuration
+/.claude/

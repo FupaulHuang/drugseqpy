@@ -1,4 +1,4 @@
-# DRUGseqPy
+# drugseqpy
 
 <p align="center">
   <picture>
@@ -11,7 +11,7 @@ Python reimplementation of the DRUGseqR package for quality control and analysis
 
 ## Overview
 
-DRUGseqPy follows scanpy conventions throughout: the central data structure is a standard `AnnData` object where **rows are samples** and **columns are genes**, wrapped in a thin `DrugSeqData` class that enforces Drug-seq metadata conventions. The wrapper exposes `.adata` and forwards common AnnData attributes (`X`, `layers`, `obs`, `var`, and `uns`); the comparison workflow also accepts plain `AnnData` directly.
+drugseqpy follows scanpy conventions throughout: the central data structure is a standard `AnnData` object where **rows are samples** and **columns are genes**, wrapped in a thin `DrugSeqData` class that enforces Drug-seq metadata conventions. The wrapper exposes `.adata` and forwards common AnnData attributes (`X`, `layers`, `obs`, `var`, and `uns`); the comparison workflow also accepts plain `AnnData` directly.
 
 For the combined S6/S7 QC figures and plate maps, see the
 [combined-figure guide](docs/combined_figures.md). Use
