@@ -22,6 +22,9 @@ For combined-sample QC figures and plate maps, see the
 shared-well selection, fixed baseline species, marker and housekeeping panels,
 STAR read metrics, and exported plotting tables.
 
+For input preparation, we recommend [libraryseq-fastq-to-matrix](https://github.com/FupaulHuang/libraryseq-fastq-to-matrix) to convert raw FASTQ reads into gene-by-well UMI count matrices with STARsolo.
+Use [EasyPlate](https://github.com/FupaulHuang/EasyPlate) to plan plate layouts, assign well metadata, and export plate annotations for downstream analysis.
+
 ## AnnData layout
 
 | Slot | Contents |
