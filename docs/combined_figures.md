@@ -1,7 +1,7 @@
 # Combined-library QC figures
 
 `generate_combined_qc_report()` implements the 14 QC figures and six plate maps
-in the S6/S7 `03.combined_figure` workflow. It accepts `AnnData` or `DrugSeqData`,
+in the combined-sample workflow. It accepts `AnnData` or `DrugSeqData`,
 recomputes values from raw counts, and writes figures plus auditable CSV tables.
 Individual `plot_*` functions return Matplotlib figures for notebook use.
 
@@ -13,14 +13,14 @@ import drugseqpy as ds
 result = ds.generate_combined_qc_report(
     adata,
     "combined_qc",
-    baseline_group="S6",
+    baseline_group="sample_1",
     groupby="plate_id",
     barcode_col="barcode",
     filtered_col="in_filtered_matrix",
     reads_col="reads_per_well",  # STARsolo CellReads.stats cbMatch
     summary_files={
-        "S6": "S6/library_seq_Solo.out/Gene/Summary.csv",
-        "S7": "S7/library_seq_Solo.out/Gene/Summary.csv",
+        "sample_1": "sample_1/library_seq_Solo.out/Gene/Summary.csv",
+        "sample_2": "sample_2/library_seq_Solo.out/Gene/Summary.csv",
     },
     formats=("pdf", "png"),
 )
@@ -56,7 +56,7 @@ the doughnut and records the reason in `result['skipped']`.
 
 ```python
 tables = ds.compute_combined_qc(
-    adata, baseline_group="S6", filtered_col="in_filtered_matrix",
+    adata, baseline_group="sample_1", filtered_col="in_filtered_matrix",
 )
 fig = ds.plot_combined_barnyard(tables["wells"])
 fig.savefig("barnyard.pdf")
@@ -135,17 +135,23 @@ each panel a separate legend/colorbar and an independent continuous range.
 Their default shared scale remains available. Independent ranges help examine
 variation within each plate; compare colorbar values when comparing plates.
 
-To reproduce the actual S6/S7 folder and compare the computations against its
-original exported tables:
+To reproduce a local combined-figure dataset and compare computations against
+its exported reference tables:
 
 ```bash
 PYTHONPATH=src python scripts/reproduce_combined_figures.py \
-  /mnt/frankh/nfs_share/01.Library_seq/12.data_0921/10.star_UMIstart/03.combined_figure \
-  validation/combined_s6_s7
+  /path/to/combined_reference \
+  validation/combined_samples
 ```
 
-This reads the saved raw 192-well AnnData and STAR summary files, generates 20
-PDFs plus PNGs, and validates shared-well counts, composition, marker means,
-feature totals, saturation values, purity statistics, read metrics, and plate
-populations. The source folder is read-only. Results and validation details
-are written under the supplied output directory.
+The reference folder contains one raw AnnData file under `results/plate_maps/`,
+reference CSVs under `results/tables/`, and per-sample STAR summaries under
+`inputs/star_results_UMIstart/<sample>/library_seq_Solo.out/Gene/Summary.csv`.
+The script discovers sample identifiers from the input metadata and assigns
+`sample_1`, `sample_2`, and so on in first-observed order. The first sample is
+the baseline unless `--baseline-group` is supplied. It creates 20 PDFs plus
+PNGs for the default panels and checks the values against the reference tables.
+The output manifest omits the input path. Original input files are not modified.
+
+Use the same neutral labels in public metadata, filenames, plot legends, and
+captions; keep any mapping to original identifiers outside published materials.

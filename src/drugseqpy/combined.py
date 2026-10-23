@@ -1,6 +1,6 @@
 """Combined-library QC figures with shared wells and a fixed species baseline.
 
-The calculations follow the S6/S7 combined-figure workflow. Inputs are AnnData
+The calculations follow the combined-sample figure workflow. Inputs are AnnData
 or DrugSeqData, with observations as wells and variables as feature rows.
 Plot functions return Matplotlib figures; the report also exports source tables.
 """

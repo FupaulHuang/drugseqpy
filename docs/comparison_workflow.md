@@ -37,21 +37,15 @@ result = ds.run_comparison_workflow(
 )
 ```
 
-The repository includes two self-contained, universal tutorials. F1 is used
-only to render real output for the single-plate workflow; F1/F2 are used only
-to render real output for the multi-plate workflow. STARsolo bundles live
-under `data/F1` and `data/F2`; local Hallmark, GO BP, and Reactome GMT files
-live under `data/gene_sets`:
+The worked examples use Sample 1 for a single-plate analysis and Sample 1
+and Sample 2 for a multi-plate analysis. Use neutral identifiers such as
+`sample_1` and `sample_2` in metadata, paths, and exported figures.
 
-```bash
-PYTHONPATH=src python examples/run_universal_comparison_tutorials.py
-python examples/build_universal_comparison_tutorials.py
-```
-
-Open [`single_plate_comparison_workflow_tutorial.html`](../examples/single_plate_comparison_workflow_tutorial.html)
-for one-plate analyses. Open
-[`multi_plate_comparison_workflow_tutorial.html`](../examples/multi_plate_comparison_workflow_tutorial.html)
-for two or more plates.
+See the [tutorial website](https://fupaulhuang.github.io/drugseqpy-tutorials/index.html)
+for practice inputs and the
+[multi-plate comparison tutorial](https://fupaulhuang.github.io/drugseqpy-tutorials/multi-plate-comparison.html)
+for two or more plates. The examples below describe the single-plate and
+multi-plate comparison API.
 
 Both worked examples deliberately use only the QC checks needed to support the
 comparison decision. They compute sample metrics and plate layouts, then
